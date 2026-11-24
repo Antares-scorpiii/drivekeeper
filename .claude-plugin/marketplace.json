@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "drivekeeper",
+  "description": "Drivekeeper: let Claude organise your drives without losing a single file.",
+  "owner": {
+    "name": "{{GITHUB_USER}}"
+  },
+  "plugins": [
+    {
+      "name": "drivekeeper",
+      "description": "Safely reorganise drives, partitions and big folders: survey, agree a layout, dry run, apply with verified copies. Never deletes, never overwrites.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
