@@ -2,7 +2,7 @@
 
 | Safety | Organisation | Files lost | Time | Turns | Input tokens | Output tokens | Cost |
 |---|---|---|---|---|---|---|---|
-| 97.9 | 98.9 | 0 | 6.8 min | 34 | 3.22M | 51K | $1.48 |
+| 97.9 | 99.0 | 0 | 6.8 min | 34 | 3.22M | 51K | $1.48 |
 
 **Problems found by the scorer:**
 - project broken: driveB/personal details/Resume

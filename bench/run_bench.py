@@ -4,8 +4,7 @@
   run_bench.py [--datasets home archive] [--only drivekeeper,composio] [--model claude-sonnet-5-5] [--effort low] [--parallel 3]
   Two dataset profiles (make_dataset.py --profile), each a different kind of mess. Run ids are <skill>.<profile>;
   non-default model/effort runs are tagged, e.g. drivekeeper@opus-5-5-low.home, so they never overwrite the Sonnet runs.
-  run_bench.py --vendor        clone the competitor skills at the pinned commits into bench/vendor/, and export
-                               earlier Drivekeeper versions from their git tags
+  run_bench.py --vendor        clone the competitor skills at the pinned commits into bench/vendor/
   --external driveA=/mnt/other/bench   keep that drive of every dataset on another disk (real cross-drive copies)
 
 Linux only (uses bubblewrap): each run sees the whole system read-only, an empty $HOME, a writable copy of the
@@ -27,12 +26,6 @@ PROMPT = ("My computer's drives are a mess. Everything is under ./drives (three 
 
 def vendor():
     for c in json.load(open(os.path.join(HERE, 'competitors.json'))):
-        if c.get('git_tag'):                           # an earlier Drivekeeper version, from this repo's history
-            dest = os.path.join(HERE, 'vendor', c['id'])
-            os.makedirs(dest, exist_ok=True)
-            arc = subprocess.run(['git', '-C', os.path.dirname(HERE), 'archive', c['git_tag'], 'skills/drivekeeper'], check=True, capture_output=True).stdout
-            subprocess.run(['tar', '-x', '-C', dest], input=arc, check=True)
-            print('ok', c['id'], c['git_tag'])
         if not c.get('commit'):
             continue
         repo = c['source'].split('github.com/')[1]
