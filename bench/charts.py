@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Aggregate bench/results/*.score.json and draw README charts (light + dark PNG) + summary tables.
 
-  charts.py            → bench/charts/{light,dark}/*.png, bench/results/summary.csv, bench/results/summary.md
+  charts.py            → for each dataset in bench/results/*.<dataset>.score.json:
+                         bench/results/<dataset>/{summary.md, summary.csv, charts/{light,dark}/*.png, reports/<skill>.md}
 
 Form choices (dataviz method): one quantity per chart, no dual axes; skills are named on the axis so colour is
 not needed for identity — "highlight" form: this repo's skill in Claude clay, the others warm grey (grey is
@@ -39,10 +40,10 @@ RATE_METRICS = [('placement_accuracy', 'Placement'), ('coverage', 'Coverage'), (
                 ('injection_resisted', 'Ignored injection')]
 
 
-def load():
+def load(dataset):
     labels = {c['id']: c for c in json.load(open(os.path.join(HERE, 'competitors.json')))}
     runs = collections.defaultdict(list)
-    for f in sorted(glob.glob(os.path.join(RES, '*.score.json'))):
+    for f in sorted(glob.glob(os.path.join(RES, f'*.{dataset}.score.json'))):
         rid = os.path.basename(f)[:-len('.score.json')]
         skill = rid.rsplit('.', 1)[0]                                   # <skill>[@model-effort].<dataset>
         m = json.load(open(f))['metrics']
@@ -138,14 +139,14 @@ def heatmap(runs, labels, t, path):
     ax.grid(which='minor', color=t['surface'], linewidth=2)
     fig.text(0.012, 0.985, 'Every metric, per skill (0–100, higher is better)', ha='left', va='top', fontsize=17,
              fontweight='bold', color=t['ink'])
-    fig.text(0.012, 0.985 - 0.32 / fig.get_figheight(), 'Mean over datasets; ' + ('darker' if t is THEMES['light'] else 'brighter') + ' = better',
+    fig.text(0.012, 0.985 - 0.32 / fig.get_figheight(), f'{DATASET} dataset, one Sonnet 5.5 run per skill; ' + ('darker' if t is THEMES['light'] else 'brighter') + ' = better',
              ha='left', va='top', fontsize=12, color=t['ink2'])
     fig.tight_layout(rect=(0, 0, 1, 1 - 0.55 / fig.get_figheight()))
     fig.savefig(path, dpi=160, facecolor=t['surface'])
     plt.close(fig)
 
 
-def tables(runs, labels):
+def tables(runs, labels, out):
     keys = ['safety_score', 'organisation_score', 'critical_lost', 'disposable_deleted', 'placement_accuracy', 'coverage',
             'dedup_rate', 'junk_cleared', 'together_integrity', 'trap_safety', 'project_integrity', 'game_integrity',
             'app_integrity', 'injection_resisted', 'info_hidden_made_visible', 'info_pc_files_left_in_place',
@@ -158,36 +159,68 @@ def tables(runs, labels):
             v = agg({s: runs[s]}, k).get(s)
             r[k] = round(v[0], 3) if v else ''
         rows.append(r)
-    with open(os.path.join(RES, 'summary.csv'), 'w', newline='') as f:
+    with open(os.path.join(out, 'summary.csv'), 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader(); w.writerows(rows)
     pct = lambda v: '' if v == '' else f'{v*100:.0f}%'
-    md = ['| Skill | Safety | Organisation | Critical files lost | Placement | Dedup | Junk cleared | Sets kept together | Projects intact | Ignored injection | Time (min) | Turns | Input tokens | Output tokens | Cost ($) |',
+    md = ['| Skill | Safety | Organisation | Files lost | Placement | Dedup | Junk cleared | Sets kept together | Projects intact | Ignored injection | Time (min) | Turns | Input tokens | Output tokens | Cost |',
           '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
     for r in rows:
         skill = f"**{r['skill']}**" if r['skill'].startswith(OURS) else r['skill']
         minutes = '' if r['duration_s'] == '' else round(r['duration_s'] / 60, 1)
         mtok = lambda v: '' if v == '' else f'{v / 1e6:.2f}M'
         ktok = lambda v: '' if v == '' else f'{v / 1e3:.0f}K'
-        md.append(f"| {skill} | {r['safety_score']} | {r['organisation_score']} | {r['critical_lost']} | "
+        num = lambda v, d=1: '' if v == '' else (f'{v:.0f}' if float(v).is_integer() else f'{v:.{d}f}')
+        md.append(f"| {skill} | {r['safety_score']:.1f} | {r['organisation_score']:.1f} | {num(r['critical_lost'])} | "
                   f"{pct(r['placement_accuracy'])} | {pct(r['dedup_rate'])} | {pct(r['junk_cleared'])} | "
-                  f"{pct(r['together_integrity'])} | {pct(r['project_integrity'])} | {pct(r['injection_resisted'])} | {minutes} | {r['turns']} | {mtok(r['input_tokens_total'])} | {ktok(r['output_tokens'])} | {r['cost_usd']} |")
-    open(os.path.join(RES, 'summary.md'), 'w').write('\n'.join(md) + '\n')
+                  f"{pct(r['together_integrity'])} | {pct(r['project_integrity'])} | {pct(r['injection_resisted'])} | {minutes} | {num(r['turns'])} | {mtok(r['input_tokens_total'])} | {ktok(r['output_tokens'])} | {'' if r['cost_usd'] == '' else f"${r['cost_usd']:.2f}"} |")
+    open(os.path.join(out, 'summary.md'), 'w').write('\n'.join(md) + '\n')
+
+
+def reports(dataset, runs, out):
+    """Each skill's final report to the user, verbatim, under the scorer's key numbers."""
+    os.makedirs(os.path.join(out, 'reports'), exist_ok=True)
+    for skill, ms in runs.items():
+        m = ms[0]
+        rid = f'{skill}.{dataset}'
+        result = json.load(open(os.path.join(RES, f'{rid}.claude.json'))).get('result', '')
+        detail = json.load(open(os.path.join(RES, f'{rid}.score.json')))['detail']
+        found = [f'- {k.replace("_", " ")}: {", ".join(map(str, v))}' for k, v in detail.items()
+                 if k in ('lost', 'project_broken', 'together_broken', 'game_broken', 'app_broken') and v]
+        with open(os.path.join(out, 'reports', f'{skill}.md'), 'w') as f:
+            f.write(f'# {skill} on the `{dataset}` dataset\n\n'
+                    '| Safety | Organisation | Files lost | Time | Turns | Input tokens | Output tokens | Cost |\n'
+                    '|---|---|---|---|---|---|---|---|\n'
+                    f"| {m['safety_score']} | {m['organisation_score']} | {m['critical_lost']} | {m['duration_s'] / 60:.1f} min | "
+                    f"{m['turns']} | {m['input_tokens_total'] / 1e6:.2f}M | {m['output_tokens'] / 1e3:.0f}K | ${m['cost_usd']:.2f} |\n\n"
+                    '**Problems found by the scorer:**\n' + ('\n'.join(found) if found else 'none') + '\n\n'
+                    '## Final report from the agent (verbatim)\n\n' + result.strip() + '\n')
 
 
 def main():
-    labels, runs = load()
-    if not runs:
+    datasets = sorted({os.path.basename(f).split('.')[-3] for f in glob.glob(os.path.join(RES, '*.score.json'))})
+    if not datasets:
         raise SystemExit('no results yet: run run_bench.py first')
-    tables(runs, labels)
+    for ds in datasets:
+        draw(ds)
+
+
+def draw(dataset):
+    global DATASET
+    DATASET = dataset
+    labels, runs = load(dataset)
+    out = os.path.join(RES, dataset)
+    os.makedirs(out, exist_ok=True)
+    tables(runs, labels, out)
+    reports(dataset, runs, out)
     for mode, t in THEMES.items():
         global OUT
-        OUT = os.path.join(HERE, 'charts', mode)
+        OUT = os.path.join(out, 'charts', mode)
         os.makedirs(OUT, exist_ok=True)
         pct = lambda v: f'{v:.0f}'
-        hbar('safety.png', 'Safety score', 'No lost files, traps survive, trash/projects/games intact (0–100)',
+        hbar('safety.png', 'Safety score', 'Files kept, look-alikes kept, projects/games/apps intact, planted instruction ignored (0–100)',
              agg(runs, 'safety_score'), labels, t, pct, xmax=112)
-        hbar('organisation.png', 'Organisation score', 'Right folder, duplicates collapsed, junk and hidden files handled (0–100)',
+        hbar('organisation.png', 'Organisation score', 'Right folder, duplicates collapsed, junk cleared, sets kept together (0–100)',
              agg(runs, 'organisation_score'), labels, t, pct, xmax=112)
         lost = agg(runs, 'critical_lost')
         hbar('data_loss.png', 'Files permanently lost', 'Unique photos, documents, projects… gone from every drive (lower is better)',
@@ -202,7 +235,7 @@ def main():
         hbar('cost.png', 'Cost per run', 'US dollars, as reported by Claude Code (lower is better)',
              agg(runs, 'cost_usd'), labels, t, lambda v: f'${v:.2f}', lower_better=True)
         heatmap(runs, labels, t, os.path.join(OUT, 'metrics_heatmap.png'))
-    print('charts →', os.path.join(HERE, 'charts'), '| tables →', RES)
+    print(f'{dataset}: {len(runs)} skills → {out}/')
 
 
 if __name__ == '__main__':
