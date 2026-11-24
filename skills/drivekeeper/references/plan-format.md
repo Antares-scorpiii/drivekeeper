@@ -23,7 +23,7 @@
 | Rule | Example | Effect |
 |---|---|---|
 | move into folder | `{"move": "/home/me/Downloads/*.AppImage", "to": "/mnt/data1/Software/"}` | trailing `/` = keep the name, put it in that folder. Globs allowed (`**` recursive) |
-| move/rename | `{"move": "/mnt/d/x/pan.pdf", "to": "/mnt/d/Personal/PAN Card.pdf", "log": "Personal"}` | exact destination path; `log` records the rename |
+| move/rename | `{"move": "/mnt/d/x/scan0042.pdf", "to": "/mnt/d/Personal/Passport.pdf", "log": "Personal"}` | exact destination path; `log` records the rename |
 | each | `{"each": "/mnt/d/Phone/WhatsApp", "to": "/home/me/Pictures/Phone/WhatsApp/Images/"}` | every non-hidden entry of the folder (add `"hidden": true` to include hidden) |
 | phone routing | `{"route": "phone", "from": "/mnt/d/PhoneDump", "to": "/home/me/Pictures/Phone"}` | recursive, by file name: `Screenshot*`→Screenshots, `*-WA0…`→WhatsApp/Images or Video, `Snapchat*`→Snapchat, a date in the name→`Camera/YYYY/YYYY-MM`, else `Camera/undated`. Hidden files (`.thumbnails/`, `.trashed-*`, markers) are skipped and reported as UNPLANNED: cover them with explicit rules once the user has decided |
 | quarantine | `{"quarantine": "/home/me/Downloads/app-v1.AppImage", "category": "Old versions"}` | categories used so far: Duplicates, Old versions, Compressed copies, Windows exe, Junk, Old resumes, Empty folders, Review |

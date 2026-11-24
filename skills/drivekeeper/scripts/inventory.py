@@ -20,12 +20,14 @@ DATE = re.compile(r'(?<!\d)(19[89]\d|20[0-4]\d)[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|
 
 
 def walk(root):
+    """os.walk that skips the insides of .git, node_modules, virtualenvs and caches."""
     for dp, dn, fn in os.walk(root):
         dn[:] = [d for d in dn if d not in ('.git', 'node_modules', '.venv', 'site-packages', '__pycache__')]
         yield dp, dn, fn
 
 
 def survey(root, depth):
+    """Per-folder size, file count and top extensions down to depth."""
     size, count, ext = collections.Counter(), collections.Counter(), collections.defaultdict(collections.Counter)
     for dp, _, fn in walk(root):
         rel = os.path.relpath(dp, root).split(os.sep)
@@ -45,6 +47,7 @@ def survey(root, depth):
 
 
 def md5(p):
+    """md5 hex digest of a file, read in 1 MB chunks."""
     h = hashlib.md5()
     with open(p, 'rb') as f:
         for c in iter(lambda: f.read(1 << 20), b''):
@@ -53,6 +56,7 @@ def md5(p):
 
 
 def dups(roots):
+    """Groups of identical files: same size first, then confirmed by md5."""
     by_size = collections.defaultdict(list)                       # only files sharing a size can be identical
     for r in roots:
         for dp, _, fn in walk(r):
@@ -80,6 +84,7 @@ def dups(roots):
 
 
 def is_hidden(path, name):
+    """Dot-name, or the Windows hidden attribute."""
     if name.startswith('.'):
         return True
     attrs = getattr(os.lstat(path), 'st_file_attributes', 0)      # Windows only
@@ -87,6 +92,7 @@ def is_hidden(path, name):
 
 
 def hidden(roots, limit=300):
+    """Hidden files split into user content and app/project configuration."""
     content, functional = [], collections.Counter()
     for r in roots:
         for dp, dn, fn in os.walk(r):
@@ -106,6 +112,7 @@ def hidden(roots, limit=300):
 
 
 def drives():
+    """Mounted volumes with filesystem, size, used and free space."""
     if os.name == 'nt':
         mounts = [f'{l}:\\' for l in string.ascii_uppercase if os.path.exists(f'{l}:\\')]
     else:
@@ -133,6 +140,7 @@ def drives():
 
 
 def dates(root, limit=None):
+    """Date range found in file names, per folder."""
     rng = collections.defaultdict(list)
     for dp, _, fn in walk(root):
         for f in fn:
@@ -286,6 +294,7 @@ def overview(roots, out='.'):
     base = os.path.commonpath([os.path.abspath(r) for r in roots]) if len(roots) > 1 else os.path.dirname(os.path.abspath(roots[0]))
     short = lambda x: str(x).replace(base + os.sep, '')[:200]
     def sect(title, rows, cap):
+        """Add one section: the full list to the details file, the first cap rows to the printed overview."""
         full.append(f'== {title} ({len(rows)})'); full.extend(map(str, rows))
         shown.append(f'== {title} ({len(rows)})'); shown.extend(f'  {short(x)}' for x in rows[:cap])
         if len(rows) > cap:

@@ -2,14 +2,14 @@
 """Plan-driven, never-lose-anything file organiser.
 
   organise.py plan.json             dry run (default): changes nothing, writes <plan>-dryrun.csv
-  organise.py plan.json --check     only lists UNPLANNED files (no rule covers them)
-  organise.py plan.json --go        pre-approved jobs, one call: stop if anything is UNPLANNED, else apply, tidy the
-                                    folders this run emptied, verify against the move log, print a short report
-  organise.py --verify LOG.csv      every moved file is at its destination with its size, no source or .part left
-  organise.py plan.json --apply     does it, then re-points symlinks/launchers whose target moved; writes the move
-                                    log next to the quarantine ("Drivekeeper move log <date>.csv", + rename logs)
-  organise.py --undo LOG.csv        moves everything in a move log back (newest first), restores links
-  organise.py --selftest            tests the engine on a throw-away folder
+  organise.py plan.json --check     lists only the UNPLANNED files (those no rule covers)
+  organise.py plan.json --apply     applies the plan, re-points symlinks and launchers whose target moved, and
+                                    writes "Drivekeeper move log <date>.csv" next to the quarantine
+  organise.py plan.json --go        one call for pre-approved jobs: stops if anything is UNPLANNED, otherwise applies,
+                                    removes the folders this run emptied, verifies against the move log and reports
+  organise.py --verify LOG.csv      checks every logged move: destination present with its size, source and .part gone
+  organise.py --undo LOG.csv        moves everything in a move log back (newest first) and restores links
+  organise.py --selftest            tests the engine in a throw-away folder
 
 Plan (JSON):
 {
@@ -19,7 +19,7 @@ Plan (JSON):
   "logs":   {"Personal": "/mnt/a/Personal/Rename log.csv"},
   "rules": [                                          # processed in order; the FIRST rule for a path wins
     {"move": "/home/me/Downloads/*.AppImage", "to": "/mnt/a/Software/"},       # trailing / = into folder
-    {"move": "/mnt/b/docs/pan.pdf", "to": "/mnt/a/Personal/PAN Card.pdf", "log": "Personal"},
+    {"move": "/mnt/b/docs/scan0042.pdf", "to": "/mnt/a/Personal/Passport.pdf", "log": "Personal"},
     {"each": "/mnt/b/Phone/WhatsApp", "to": "/home/me/Pictures/Phone/WhatsApp/Images/"},
     {"route": "phone", "from": "/mnt/b/Phone", "to": "/home/me/Pictures/Phone"},
     {"quarantine": "/home/me/Downloads/old-v1/", "category": "Old versions"},
@@ -62,6 +62,7 @@ PROJECT = {'.git', 'pyproject.toml', 'package.json', 'setup.py', 'Makefile', 'CM
 
 
 def kind(name):
+    """Kind of a file by extension (photo, video, document, ...), "other" if none matches."""
     low = name.lower()
     return next((k for k, exts in KINDS.items() if low.endswith(exts)), 'other')
 
@@ -106,6 +107,7 @@ def companions(names):
 
 
 class Engine:
+    """Turns a plan into an ordered list of operations and runs them (dry run unless apply=True)."""
     def __init__(self, plan, apply=False):
         self.plan, self.apply = plan, apply
         self.q = norm(plan['quarantine'])
@@ -117,30 +119,37 @@ class Engine:
 
     # ── helpers ────────────────────────────────────────────────────────────────────────────────
     def label(self, p):
+        """Return (root, label) of the labelled root that contains p, used for quarantine paths and clash suffixes."""
         best = max((r for r in self.labels if p == r or p.startswith(r.rstrip(SEP) + SEP)), key=len, default=None)
         return (best, self.labels[best]) if best else (os.path.dirname(p), 'other')
 
     def qpath(self, src, cat):
+        """Quarantine path for src: <quarantine>/from <label>/<category>/<path relative to its root>."""
         root, lab = self.label(src)
         return os.path.join(self.q, f'from {lab}', cat, os.path.relpath(src, root))
 
     def dev(self, p):
+        """Device id of p (or of its nearest existing parent); equal ids mean a move is a rename."""
         return os.stat(self._existing(p)).st_dev
 
     def exists(self, p):
+        """True if p is on disk, or (in a dry run) already claimed as a destination by an earlier operation."""
         return os.path.lexists(p) or (not self.apply and p in self.planned)
 
     def note(self, action, src, dst='', size=0, info=''):
+        """Record one action for the log CSV and the counts."""
         self.log.append((action, src, dst, size, info))
         self.stats[action] = self.stats.get(action, 0) + 1
 
     def hash(self, p):                                             # md5, read once per path
+        """md5 of p, computed once per path."""
         if p not in self.hashes:
             self.hashes[p] = self.md5(p)
         return self.hashes[p]
 
     @staticmethod
     def md5(p):
+        """md5 hex digest of a file, read in 1 MB chunks."""
         h = hashlib.md5()
         with open(p, 'rb') as f:
             for c in iter(lambda: f.read(1 << 20), b''):
@@ -149,6 +158,7 @@ class Engine:
 
     # ── building the operation list (reads directory listings only) ────────────────────────────
     def claim(self, kind, src, dst=None, extra=None):
+        """Queue one operation for src unless an earlier rule already claimed it (the first rule wins)."""
         src = norm(src)
         dst = norm(dst) if isinstance(dst, str) else dst
         if not os.path.lexists(src):
@@ -161,10 +171,12 @@ class Engine:
 
     @staticmethod
     def target(src, to):
+        """Destination for src: into the folder if to ends with a slash, otherwise exactly to."""
         into = to.endswith(('/', '\\'))
         return norm(os.path.join(to, os.path.basename(norm(src)))) if into else norm(to)
 
     def phone_dest(self, name, base):
+        """Destination for a phone file: Screenshots, WhatsApp, or Camera/YYYY/YYYY-MM from the date in its name."""
         low = name.lower()
         vid = low.endswith(VIDEO)
         if low.startswith('screenshot'):
@@ -177,6 +189,7 @@ class Engine:
         return f'{base}/Camera/{m[1]}/{m[1]}-{m[2]}' if m else f'{base}/Camera/undated'
 
     def route_phone(self, folder, base):
+        """Claim every file under a phone dump for its phone_dest."""
         for dp, dn, fn in os.walk(folder):
             dn.sort()
             for f in sorted(fn):
@@ -187,6 +200,7 @@ class Engine:
                     self.claim('move', p, os.path.join(self.phone_dest(f, base), f))
 
     def covered(self, p):
+        """True if p or any of its parent folders is claimed by a rule."""
         while True:
             if p in self.claimed:
                 return True
@@ -224,6 +238,7 @@ class Engine:
                 self.claim('move', p, norm(os.path.join(dest, rel, f)))
 
     def build(self):
+        """Expand the plan's rules, in order, into claimed operations."""
         for r in self.plan['rules']:
             if 'route' in r:
                 if os.path.isdir(r['from']):
@@ -255,6 +270,7 @@ class Engine:
                     self.claim('keep', src)
 
     def unplanned(self):
+        """Files and folder symlinks under "scan" that no rule covers (OS folders skipped)."""
         out = []
         for root in map(norm, self.plan.get('scan', [])):
             for dp, dn, fn in os.walk(root):
@@ -268,6 +284,7 @@ class Engine:
 
     # ── execution ──────────────────────────────────────────────────────────────────────────────
     def check_space(self, dst, size):
+        """Stop before a copy that would leave less than RESERVE free on the destination drive."""
         if self.apply and size and shutil.disk_usage(self._existing(dst)).free - size < RESERVE:
             raise SystemExit(f'STOP: not enough space for {dst} ({size/1e9:.1f} GB)')
 
@@ -281,6 +298,7 @@ class Engine:
         return p
 
     def suffixed(self, dst, src):
+        """A free name next to dst: "name (label).ext", then "name (label) 2.ext", ..."""
         base, ext = os.path.splitext(dst)
         tag = ' (' + self.label(src)[1] + ')'
         cand, i = f'{base}{tag}{ext}', 2
@@ -289,6 +307,7 @@ class Engine:
         return cand
 
     def copy_verified(self, src, dst):
+        """Cross-drive move: copy to .part, compare md5, rename into place, then remove the source."""
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         if os.path.islink(src):
             try:
@@ -317,6 +336,7 @@ class Engine:
         os.unlink(src)
 
     def place_file(self, src, dst, log=None, allow_dup=True):
+        """Move one file: skip md5-identical duplicates to the quarantine, never overwrite, rename or verified copy."""
         if not os.path.lexists(src):
             return self.note('MISSING', src, dst)
         size = os.lstat(src).st_size
@@ -357,6 +377,7 @@ class Engine:
         return dst
 
     def place(self, src, dst, log=None):
+        """Move a file or a whole folder (units such as projects move as one)."""
         if not os.path.lexists(src):
             return self.note('MISSING', src, dst)
         if not os.path.isdir(src) or os.path.islink(src):
@@ -384,6 +405,7 @@ class Engine:
                     pass
 
     def run_op(self, op):
+        """Carry out one queued operation (move, quarantine, dedupe, extract, keep)."""
         kind, src, dst, extra = op
         if kind == 'keep':
             return self.note('KEPT', src, '', 0, 'a "keep" rule leaves it where it is')
@@ -412,6 +434,7 @@ class Engine:
 
     @staticmethod
     def archive_listing(src):
+        """Members of a zip or tar as {name: size}, or None if it can't be read."""
         if zipfile.is_zipfile(src):
             with zipfile.ZipFile(src) as z:
                 return {i.filename: i.file_size for i in z.infolist() if not i.is_dir()}
@@ -434,6 +457,7 @@ class Engine:
         """Extract without ever overwriting an existing file and without escaping dst."""
         root = os.path.realpath(dst)
         def safe(name):
+            """Resolve an archive member inside root; stop on any path that escapes it (zip-slip)."""
             p = os.path.realpath(os.path.join(root, name))
             if not (p == root or p.startswith(root + SEP)):
                 raise SystemExit(f'STOP: archive member escapes the target folder: {name}')
@@ -498,11 +522,13 @@ class Engine:
                 d = os.path.dirname(d)
 
     def sweep_empty(self):
+        """Quarantine scanned folders that hold no files at all."""
         for root in map(norm, self.plan.get('scan', [])):
             if os.path.isdir(root) and not any(fn for _, _, fn in os.walk(root)):
                 self.place(root, self.qpath(root, 'Empty folders'))
 
     def run(self, out_prefix):
+        """Build, report UNPLANNED files, run every operation and write the dry-run or move log CSV."""
         self.build()
         for p in self.unplanned():
             self.note('UNPLANNED', p, '', os.lstat(p).st_size, 'no rule covers it: left where it is')
@@ -650,6 +676,7 @@ def undo(log_path):
 
 
 def selftest():
+    """Runs the engine on a throw-away folder and asserts every guarantee; prints "selftest OK"."""
     with tempfile.TemporaryDirectory() as d:
         A, B, H, Q = f'{d}/A', f'{d}/B', f'{d}/H', f'{d}/B/_q'
         files = {f'{A}/a/x.jpg': b'1', f'{B}/b/x.jpg': b'1', f'{B}/b/y.jpg': b'2', f'{A}/c/y.jpg': b'3',

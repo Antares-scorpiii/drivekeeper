@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Aggregate bench/results/*.score.json and draw README charts (light + dark PNG) + summary tables.
+"""Summary tables, per-skill reports and charts (light and dark PNG) from bench/results/*.score.json.
 
-  charts.py            → for each dataset in bench/results/*.<dataset>.score.json:
-                         bench/results/<dataset>/{summary.md, summary.csv, charts/{light,dark}/*.png, reports/<skill>.md}
+  charts.py   for each dataset: bench/results/<dataset>/{summary.md, summary.csv, reports/<skill>.md, charts/{light,dark}/}
+              plus bench/results/versions/{light,dark}/versions.png (Drivekeeper releases on VERSIONS_DATASET)
 
-Form choices (dataviz method): one quantity per chart, no dual axes; skills are named on the axis so colour is
-not needed for identity — "highlight" form: this repo's skill in Claude clay, the others warm grey (grey is
-deliberately achromatic; every bar carries its value as text, which is the contrast relief); the metric heatmap
-uses one sequential clay ramp with values printed in every cell; data loss uses the reserved critical red with a
-text label. Mean over the three datasets; whiskers show min–max across datasets.
-Look: Claude's warm surfaces + a slight hand-drawn wobble (matplotlib path.sketch) + Patrick Hand (OFL, fonts/).
-Runs tagged with a model/effort (e.g. drivekeeper@opus-5-5-low) are plotted as their own rows.
+Form choices (dataviz method): one quantity per chart; skills are named on the axis, so colour is not needed for
+identity: Drivekeeper in Claude clay, the others warm grey, every bar labelled with its value. The heatmap uses one
+sequential clay ramp with a value in every cell. The releases chart is the one exception to "one quantity": time
+(bars, left axis) and cost (line, right axis) share the zero baseline, with the bars scaled to stay below the line.
+Whiskers show min-max when a skill has several runs on a dataset. Runs cut short (is_error) are skipped.
+Look: Claude's warm surfaces, a light hand-drawn wobble (matplotlib path.sketch) and Patrick Hand (OFL) if it is in
+bench/fonts/. Runs with another model or effort (e.g. drivekeeper@opus-5-5-low) are plotted as their own rows.
 """
 import collections, csv, glob, json, os, re
 import matplotlib
@@ -22,11 +22,12 @@ from matplotlib.colors import LinearSegmentedColormap
 HERE = os.path.dirname(os.path.abspath(__file__))
 RES, OUT = os.path.join(HERE, 'results'), os.path.join(HERE, 'charts')
 OURS = 'drivekeeper'
+VERSIONS_DATASET = 'family-pc'
 THEMES = {   # validated with the dataviz validator: clay vs grey passes CVD (ΔE 15.6 light / 9.5 dark) and lightness band
     'light': dict(surface='#faf9f5', ink='#141413', ink2='#5e5d59', muted='#87867f', grid='#e8e6dc', accent='#c6613f',
-                  other='#b0aea5', critical='#bf4d43', ramp=['#f9ebe4', '#f2cdbb', '#e9a98c', '#d97757', '#b4532f', '#7d3519']),
+                  other='#b0aea5', ramp=['#f9ebe4', '#f2cdbb', '#e9a98c', '#d97757', '#b4532f', '#7d3519']),
     'dark': dict(surface='#262624', ink='#faf9f5', ink2='#c2c0b6', muted='#87867f', grid='#3a3a37', accent='#d4704f',
-                 other='#6b6a65', critical='#e5695c', ramp=['#3a2b25', '#5e3626', '#8c4a30', '#c0623e', '#e08a6d', '#f2c4b0']),
+                 other='#6b6a65', ramp=['#3a2b25', '#5e3626', '#8c4a30', '#c0623e', '#e08a6d', '#f2c4b0']),
 }
 SKETCH = (0.9, 110, 2)   # path.sketch (scale, length, randomness): a light hand-drawn wobble; None = clean lines
 FONT = os.path.join(HERE, 'fonts', 'PatrickHand-Regular.ttf')
@@ -41,6 +42,7 @@ RATE_METRICS = [('placement_accuracy', 'Placement'), ('coverage', 'Coverage'), (
 
 
 def load(dataset):
+    """Competitor labels and, per skill, the metrics of every finished run on this dataset."""
     labels = {c['id']: c for c in json.load(open(os.path.join(HERE, 'competitors.json')))}
     runs = collections.defaultdict(list)
     for f in sorted(glob.glob(os.path.join(RES, f'*.{dataset}.score.json'))):
@@ -57,6 +59,7 @@ def load(dataset):
 
 
 def agg(runs, key):
+    """Per skill: (mean, min, max) of one metric."""
     out = {}
     for s, ms in runs.items():
         v = [m.get(key) for m in ms if isinstance(m.get(key), (int, float))]
@@ -66,11 +69,13 @@ def agg(runs, key):
 
 
 def flat(fig, ax):
+    """Keep figure and axes backgrounds straight (no hand-drawn wobble)."""
     for p in (fig.patch, ax.patch):   # keep backgrounds straight so the wobble never exposes the page edge
         p.set_sketch_params(None)
 
 
 def style(ax, t):
+    """Surface, spines, ticks and grid for one axes."""
     ax.set_facecolor(t['surface'])
     flat(ax.figure, ax)
     for side in ('top', 'right', 'left'):
@@ -82,6 +87,7 @@ def style(ax, t):
 
 
 def name(labels, s):
+    """Axis label for a skill: our skill starred, model tag and install count added."""
     base, _, cfg = s.partition('@')                                    # e.g. drivekeeper@opus-5-5-low
     c = labels.get(base, {})
     tag = f" ({c['installs']} installs)" if c.get('installs') else ''
@@ -90,6 +96,7 @@ def name(labels, s):
 
 
 def hbar(fig_name, title, subtitle, data, labels, t, fmt, xmax=None, lower_better=False, color_fn=None):
+    """One horizontal bar chart, best at the top, our skill in clay, values printed on the bars."""
     items = sorted(data.items(), key=lambda kv: kv[1][0], reverse=not lower_better)
     items.reverse()                                                     # best at the top
     fig, ax = plt.subplots(figsize=(8.2, 0.55 * len(items) + 1.6), facecolor=t['surface'])
@@ -114,6 +121,7 @@ def hbar(fig_name, title, subtitle, data, labels, t, fmt, xmax=None, lower_bette
 
 
 def heatmap(runs, labels, t, path):
+    """Skills × rate metrics, one sequential clay ramp, value in every cell."""
     skills = sorted(runs, key=lambda s: -agg(runs, 'organisation_score').get(s, (0,))[0])
     vals = [[agg({s: runs[s]}, k).get(s, (float('nan'),))[0] for k, _ in RATE_METRICS] for s in skills]
     cmap = LinearSegmentedColormap.from_list('seq', t['ramp'])
@@ -147,6 +155,7 @@ def heatmap(runs, labels, t, path):
 
 
 def tables(runs, labels, out):
+    """summary.md and summary.csv for one dataset."""
     keys = ['safety_score', 'organisation_score', 'critical_lost', 'disposable_deleted', 'placement_accuracy', 'coverage',
             'dedup_rate', 'junk_cleared', 'together_integrity', 'trap_safety', 'project_integrity', 'game_integrity',
             'app_integrity', 'injection_resisted', 'info_hidden_made_visible', 'info_pc_files_left_in_place',
@@ -197,51 +206,66 @@ def reports(dataset, runs, out):
                     '## Final report from the agent (verbatim)\n\n' + result.strip() + '\n')
 
 
-def versions(runs, t):
-    """Our releases side by side: cost as bars (left axis), time as a line (right axis). Asked for as one figure."""
+def versions(dataset, runs, out):
+    """Drivekeeper releases on one dataset: time as bars (left axis), cost as a line (right axis). Both axes start
+    at 0 on the same baseline; the bar axis runs to twice the longest time, so the bars stay below the line.
+    Written to <out>/{light,dark}/versions.png."""
     vs = sorted(s for s in runs if s.startswith(OURS + '-v'))
-    if len(vs) < 2:
-        return
     cost = [agg(runs, 'cost_usd')[s][0] for s in vs]
     mins = [agg(runs, 'duration_s')[s][0] / 60 for s in vs]
-    x = range(len(vs))
-    fig, ax = plt.subplots(figsize=(8.2, 5), facecolor=t['surface'])
-    style(ax, t)
-    ax.grid(axis='x', visible=False); ax.grid(axis='y', color=t['grid'], linewidth=0.8)
-    ax.bar(x, cost, width=0.5, color=t['accent'], edgecolor=t['surface'], linewidth=2, label='Cost ($, bars)')
-    for i, c in zip(x, cost):
-        ax.text(i, c / 2, f'${c:.2f}', ha='center', va='center', color=t['surface'], fontsize=14, fontweight='bold')
-    ax.set_ylim(0, max(cost) * 1.3); ax.set_ylabel('Cost per run ($)', color=t['ink2'], fontsize=12)
-    ax.set_xticks(list(x), [s.split('-', 1)[1] for s in vs], fontsize=14)
-    ax2 = ax.twinx(); flat(fig, ax2)
-    for side in ('top', 'left', 'bottom'):
-        ax2.spines[side].set_visible(False)
-    ax2.spines['right'].set_color(t['muted']); ax2.tick_params(colors=t['ink2'], labelsize=12, length=0)
-    ax2.plot(list(x), mins, color=t['ink'], linewidth=2, marker='o', markersize=9,
-             markeredgecolor=t['surface'], markeredgewidth=2, label='Time (min, line)')
-    for i, m in zip(x, mins):
-        ax2.text(i + 0.08, m + max(mins) * 0.05, f'{m:.1f} min', color=t['ink'], fontsize=12)
-    ax2.set_ylim(0, max(mins) * 1.3); ax2.set_ylabel('Wall-clock minutes', color=t['ink2'], fontsize=12)
-    h = ax.get_legend_handles_labels(); h2 = ax2.get_legend_handles_labels()
-    ax.legend(h[0] + h2[0], h[1] + h2[1], loc='upper right', frameon=False, labelcolor=t['ink2'], fontsize=12)
-    d = (1 - cost[-1] / cost[0]) * 100, (1 - mins[-1] / mins[0]) * 100
-    fig.text(0.012, 0.985, 'Drivekeeper releases: cost and time', ha='left', va='top', fontsize=17, fontweight='bold', color=t['ink'])
-    fig.text(0.012, 0.93, f'{vs[0][len(OURS)+1:]} → {vs[-1][len(OURS)+1:]}: {d[0]:.0f}% cheaper, {d[1]:.0f}% faster (lower is better)',
-             ha='left', va='top', fontsize=12, color=t['ink2'])
-    fig.tight_layout(rect=(0, 0, 1, 0.9))
-    fig.savefig(os.path.join(OUT, 'versions.png'), dpi=160, facecolor=t['surface'])
-    plt.close(fig)
+    x = list(range(len(vs)))
+    top_m, top_c = max(mins) * 2, max(cost) * 1.25
+    for mode, t in THEMES.items():
+        fig, ax = plt.subplots(figsize=(8.2, 5.4), facecolor=t['surface'])
+        style(ax, t)
+        ax.grid(axis='x', visible=False)
+        ax.grid(axis='y', visible=False)
+        ax.bar(x, mins, width=0.5, color=t['accent'], edgecolor=t['surface'], linewidth=2, label='Time per run (bars, left)')
+        for i, m in zip(x, mins):
+            ax.text(i, m / 2, f'{m:.1f} min', ha='center', va='center', color=t['surface'], fontsize=13, fontweight='bold')
+        ax.set_ylim(0, top_m)
+        ax.set_ylabel('Minutes per run', color=t['ink2'], fontsize=12)
+        ax.set_xticks(x, [s.split('-', 1)[1] for s in vs], fontsize=14)
+        ax2 = ax.twinx()
+        flat(fig, ax2)
+        for side in ax2.spines:
+            ax2.spines[side].set_visible(False)
+        ax2.tick_params(colors=t['ink2'], labelsize=12, length=0)
+        ax2.set_ylim(0, top_c)                               # same zero as the bars
+        ax2.yaxis.set_major_formatter(lambda v, _: f'${v:.1f}')
+        ax2.set_ylabel('Cost per run', color=t['ink2'], fontsize=12)
+        ax2.plot(x, cost, color=t['ink'], linewidth=2, marker='o', markersize=9,
+                 markeredgecolor=t['surface'], markeredgewidth=2, label='Cost per run (line, right)')
+        for i, c in zip(x, cost):
+            ax2.text(i, c + top_c * 0.04, f'${c:.2f}', ha='center', va='bottom', color=t['ink'], fontsize=13, fontweight='bold')
+        h, l = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h + h2, l + l2, loc='upper center', bbox_to_anchor=(0.5, -0.09), ncol=2, frameon=False,
+                  labelcolor=t['ink2'], fontsize=12)
+        dc, dm = (1 - cost[-1] / cost[0]) * 100, (1 - mins[-1] / mins[0]) * 100
+        fig.text(0.012, 0.985, 'Drivekeeper releases: time and cost per run', ha='left', va='top', fontsize=17,
+                 fontweight='bold', color=t['ink'])
+        fig.text(0.012, 0.925, f'Dataset {dataset}, Sonnet 5.5. {vs[0][len(OURS) + 1:]} → {vs[-1][len(OURS) + 1:]}: '
+                 f'{dm:.0f}% faster, {dc:.0f}% cheaper, safety 100 throughout', ha='left', va='top', fontsize=12, color=t['ink2'])
+        fig.tight_layout(rect=(0, 0, 1, 0.89))
+        os.makedirs(os.path.join(out, mode), exist_ok=True)
+        fig.savefig(os.path.join(out, mode, 'versions.png'), dpi=160, facecolor=t['surface'])
+        plt.close(fig)
 
 
 def main():
+    """Draw every dataset found in bench/results, then the releases chart."""
     datasets = sorted({os.path.basename(f).split('.')[-3] for f in glob.glob(os.path.join(RES, '*.score.json'))})
     if not datasets:
         raise SystemExit('no results yet: run run_bench.py first')
     for ds in datasets:
         draw(ds)
+    labels, runs = load(VERSIONS_DATASET)            # the one dataset every release ran on
+    versions(VERSIONS_DATASET, runs, os.path.join(RES, 'versions'))
 
 
 def draw(dataset):
+    """Tables, reports and all light and dark charts for one dataset."""
     global DATASET
     DATASET = dataset
     labels, runs = load(dataset)
@@ -267,7 +291,6 @@ def draw(dataset):
         hbar('cost.png', 'Cost per run', 'US dollars, as reported by Claude Code (lower is better)',
              agg(runs, 'cost_usd'), labels, t, lambda v: f'${v:.2f}', lower_better=True)
         heatmap(runs, labels, t, os.path.join(OUT, 'metrics_heatmap.png'))
-        versions(runs, t)
     print(f'{dataset}: {len(runs)} skills → {out}/')
 
 

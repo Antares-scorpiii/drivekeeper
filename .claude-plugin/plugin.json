@@ -2,5 +2,18 @@
   "name": "drivekeeper",
   "version": "1.2.0",
   "description": "Organise messy drives and folders without losing a file: md5-proven duplicates, a reviewable quarantine instead of deletes, never overwrites, dry run before every move.",
-  "keywords": ["files", "organize", "declutter", "duplicates", "drives", "backup"]
+  "keywords": [
+    "files",
+    "organize",
+    "declutter",
+    "duplicates",
+    "drives",
+    "backup"
+  ],
+  "homepage": "https://github.com/Antares-scorpiii/drivekeeper",
+  "repository": "https://github.com/Antares-scorpiii/drivekeeper",
+  "license": "GPL-3.0-only",
+  "author": {
+    "name": "Antares-scorpiii"
+  }
 }

@@ -3,7 +3,8 @@
   "name": "drivekeeper",
   "description": "Drivekeeper: let Claude organise your drives without losing a single file.",
   "owner": {
-    "name": "{{GITHUB_USER}}"
+    "name": "Antares-scorpiii",
+    "url": "https://github.com/Antares-scorpiii"
   },
   "plugins": [
     {

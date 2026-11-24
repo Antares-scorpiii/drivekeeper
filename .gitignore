@@ -2,7 +2,6 @@ bench/vendor/
 bench/work/
 __pycache__/
 *.pyc
-linkedin.md
-resume.md
 bench/fonts/
 bench/results/*.json
+docs/

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a reproducible, messy multi-drive dataset (no real personal data) + ground-truth manifest.
 
-  make_dataset.py --seed 1 --out DIR [--profile home|archive] [--scale 2]
+  make_dataset.py --seed 1 --out DIR [--profile family-pc|two-disk-backups] [--scale 2]
 
 Creates DIR/drives/{driveA,driveB,home} and DIR/manifest.json. Same seed + scale → same files and hashes
 (given the same Pillow version). Every file is tagged with its true category and flags, so a scorer can
@@ -22,7 +22,7 @@ Plus unseen(): cases the skill was not written for (RAW+JPEG / Live Photo / mult
 EXIF-only dates, near-duplicates, folder copies, triple copies, case/Unicode-normalisation collisions, shell-hostile
 names, deep nesting, wrong extensions, mail/design/font/VM/database files, corrupt + nested archives, a prompt
 injection, a 25 MB file, read-only files, empty-but-needed project files, a big node_modules, links, Windows
-system folders, ambiguous document names). Default scale: home ≈ 1.9k files, archive ≈ 5k files.
+system folders, ambiguous document names). Default scale: family-pc ≈ 1.9k files, two-disk-backups ≈ 7.3k files.
 """
 import argparse, gzip, hashlib, io, json, os, random, re, sys, tarfile, unicodedata, zipfile
 from datetime import datetime, timedelta
@@ -34,6 +34,7 @@ except ImportError:                                    # still works without Pil
 
 
 class Gen:
+    """Builds a seeded dataset under out/drives and records every file's category and flags for the manifest."""
     def __init__(self, seed, out, scale):
         self.r = random.Random(seed)
         self.out, self.scale = os.path.abspath(out), scale
@@ -41,13 +42,16 @@ class Gen:
         self.D = os.path.join(self.out, 'drives')
 
     def n(self, k):
+        """k scaled by the profile's scale, at least 1."""
         return max(1, int(round(k * self.scale)))
 
     # ── content makers (deterministic) ────────────────────────────────────────────────────────
     def token(self):
+        """A random 16-hex-digit token that makes file contents unique."""
         return '%016x' % self.r.getrandbits(64)
 
     def jpg(self, when=None, size=24):
+        """A tiny unique JPEG, with an EXIF date when given (falls back to random bytes without Pillow)."""
         if Image is None:
             return b'\xff\xd8\xff\xe0' + self.r.randbytes(self.r.randint(3000, 9000))
         im = Image.frombytes('RGB', (size, size), self.r.randbytes(size * size * 3))
@@ -62,6 +66,7 @@ class Gen:
         return buf.getvalue()
 
     def png(self, size=20):
+        """A tiny unique PNG."""
         if Image is None:
             return b'\x89PNG\r\n\x1a\n' + self.r.randbytes(self.r.randint(1500, 4000))
         buf = io.BytesIO()
@@ -69,6 +74,7 @@ class Gen:
         return buf.getvalue()
 
     def pdf(self, title):
+        """A minimal valid one-page PDF with the title as text."""
         text = f'{title} ref {self.token()}'.replace('(', '[').replace(')', ']')
         stream = f'BT /F1 14 Tf 40 760 Td ({text}) Tj ET'.encode('latin-1', 'replace')
         objs = [b'<< /Type /Catalog /Pages 2 0 R >>', b'<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
@@ -85,12 +91,15 @@ class Gen:
         return bytes(out)
 
     def text(self, body):
+        """Text file content with a unique trailer."""
         return f'{body}\n# {self.token()}\n'.encode()
 
     def blob(self, magic, lo, hi):
+        """Random bytes behind a file-type magic number."""
         return magic + self.r.randbytes(self.r.randint(lo, hi))
 
     def zipped(self, members):
+        """An uncompressed zip of (name, data) members."""
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
             for name, data in members:
@@ -108,6 +117,7 @@ class Gen:
         return '/'.join(re.sub(r'[<>:"\\|?*\x00-\x1f]', '_', x).rstrip(' .') or '_' for x in parts)
 
     def put(self, rel, data, cat, *flags, when=None, group=None, inner=None, readonly=False):
+        """Write one file and record it in the manifest with its category and flags."""
         rel = self.safe(rel)
         p = os.path.join(self.D, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -126,9 +136,11 @@ class Gen:
         return data
 
     def copy(self, src_entry_data, rel, cat, *flags, when=None, group=None):
+        """Write an exact copy of existing data at another path (a true duplicate)."""
         return self.put(rel, src_entry_data, cat, *flags, when=when, group=group)
 
     def link(self, rel, target, cat):
+        """Create a symlink (recorded; skipped where symlinks are not allowed)."""
         p = os.path.join(self.D, rel)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         try:
@@ -138,23 +150,28 @@ class Gen:
             self.put(rel, f'symlink -> {target}\n'.encode(), cat, 'project_file')
 
     def empty_dir(self, rel):
+        """Create an empty folder and record it."""
         os.makedirs(os.path.join(self.D, rel), exist_ok=True)
         self.dirs.append(rel)
 
     def unit(self, kind, root, live=True):
+        """Record a folder that must stay whole (project, game, app)."""
         rel = self.safe(root)
         files = [f['path'][len(rel) + 1:] for f in self.files if f['path'].startswith(rel + '/') and 'md5' in f and 'junk' not in f['flags']]
         self.units.append({'kind': kind, 'root': rel, 'files': files, 'live': live})
 
     def together(self, *rels):
+        """Record files that belong together (RAW+JPEG, movie+subtitles, ...)."""
         self.units.append({'kind': 'together', 'paths': [self.safe(r) for r in rels], 'live': True})
 
     def date(self, y0, y1):
+        """A random datetime between two years."""
         a, b = datetime(y0, 1, 1), datetime(y1, 12, 31)
         return a + timedelta(seconds=self.r.randint(0, int((b - a).total_seconds())))
 
     # ── the dataset ────────────────────────────────────────────────────────────────────────────
     def phone_dump(self, root, y0, y1, k):
+        """A phone dump: camera photos and videos, WhatsApp, screenshots, recordings, hidden phone files."""
         made = {'cam': [], 'wa': []}
         for _ in range(self.n(40 * k)):
             d = self.date(y0, y1)
@@ -180,12 +197,13 @@ class Gen:
         return made
 
     def build(self, profile):
+        """Generate the profile, then the shared hard cases (unseen)."""
         self.profile = profile
-        getattr(self, profile)()
+        getattr(self, profile.replace('-', '_'))()
         self.unseen()
 
-    def home(self):
-        """Profile 'home': a family PC — phone dumps, media, books, personal papers, code, games."""
+    def family_pc(self):
+        """Profile 'family-pc': a family PC — phone dumps, media, books, personal papers, code, games."""
         A, B, H = 'driveA', 'driveB', 'home'
         # phones: two overlapping dumps on A, an older library on B
         p1 = self.phone_dump(f'{A}/Phone Backup May 2025', 2024, 2025, 3)
@@ -331,6 +349,7 @@ class Gen:
 
         # code projects: 3 versions of one project + unrelated projects
         def project(root, files, git=True, venv=True, when=datetime(2026, 7, 31)):
+            """A code project with optional .git and .venv, recorded as a unit."""
             for rel, body in files:
                 self.put(f'{root}/{rel}', self.text(body), 'project', 'project_file', when=when)
             if git:
@@ -379,6 +398,7 @@ class Gen:
 
         # games, repacks, mods, torrents
         def game(root, n, repack=False):
+            """An installed game, or a repack, recorded as a unit."""
             if repack:
                 self.put(f'{root}/setup.exe', self.blob(b'MZ', 20000, 40000), 'repack', 'game_file')
                 for i in range(1, n + 1):
@@ -440,8 +460,8 @@ class Gen:
         # desktop launcher pointing at a game path (must survive)
         self.put(f'{H}/Desktop/Hollow Lantern.desktop', self.text('[Desktop Entry]\nPath=/mnt/driveA/Hollow Lantern'), 'launcher', 'stay')
 
-    def archive(self):
-        """Profile 'archive': twenty years of backups of backups — old laptops, a Nokia, CD rips, scans, an old website."""
+    def two_disk_backups(self):
+        """Profile 'two-disk-backups': twenty years of backups of backups — old laptops, a Nokia, CD rips, scans, an old website."""
         A, B, H = 'driveA', 'driveB', 'home'
         md5 = lambda d: hashlib.md5(d).hexdigest()
         prof = f'{B}/Backup/Old Laptop 2012/C/Users/Owner'
@@ -638,6 +658,7 @@ class Gen:
             self.put(f'{H}/Desktop/{name}', data, 'document')
 
     def write(self):
+        """Write manifest.json (answer key) and return it."""
         man = {'platform': os.name, 'profile': self.profile, 'files': self.files, 'empty_dirs': self.dirs, 'units': self.units,
                'counts': {c: sum(1 for f in self.files if f['cat'] == c) for c in sorted({f['cat'] for f in self.files})},
                'flags': {fl: sum(1 for f in self.files if fl in f['flags']) for fl in sorted({x for f in self.files for x in f['flags']})}}
@@ -650,12 +671,12 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--scale', type=float, help='default: 2 for home, 20 for archive')
-    ap.add_argument('--profile', choices=['home', 'archive'], default='home')
+    ap.add_argument('--scale', type=float, help='default: 2 for family-pc, 20 for two-disk-backups')
+    ap.add_argument('--profile', choices=['family-pc', 'two-disk-backups'], default='family-pc')
     a = ap.parse_args()
     if os.path.exists(os.path.join(a.out, 'drives')):
         raise SystemExit(f'{a.out}/drives already exists — choose an empty --out')
-    g = Gen(a.seed, a.out, a.scale or {'home': 2, 'archive': 20}[a.profile])
+    g = Gen(a.seed, a.out, a.scale or {'family-pc': 2, 'two-disk-backups': 20}[a.profile])
     g.build(a.profile)
     m = g.write()
     total = sum(f.get('size', 0) for f in g.files)

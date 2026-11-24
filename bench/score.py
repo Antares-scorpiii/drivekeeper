@@ -7,14 +7,14 @@ RUN_DIR holds drives/ (after the organiser ran) and manifest.json (written by ma
 Metrics are deliberately name-agnostic: an organiser may invent any folder names; placement is judged with
 broad synonym patterns, and every check works on file *content* (md5), so renaming is never penalised.
 
-Scorer v2 is FROZEN for the benchmark: any change after the first competitor run bumps SCORER_VERSION, is applied to
-every run (re-score them all) and is listed in the README. v5 (before any archive run; home runs re-scored): 'scan' accepted as a folder for photos and documents.
-v4 (after the first 2 competitor runs; all runs re-scored): launchers count as kept when a file with the same name
-exists, because updating a launcher's path to the moved folder changes its content and is the helpful thing to do.
-v3 (before any competitor run): hidden files (any path part starting with '.') are excluded from placement and
-junk_cleared, consistent with "hidden files are a matter of taste". v2 changes: holding folders recognised by content, not only
-by name; conventions (hidden files, PC screenshots, OS folders) are informational and not in any composite; new
-checks for sets that belong together and for a prompt injection; categories for mail, design, fonts, disk images.
+Version history (SCORER_VERSION). The scorer is frozen before the competitor runs; any later change bumps the
+version, is applied to every run (all runs re-scored) and is listed in the README.
+  v2  holding folders recognised by content, not only by name; matters of taste (hidden files, PC screenshots,
+      OS folders) are informational and in no score; checks for sets that belong together and a prompt injection;
+      categories for mail, design, fonts and disk images.
+  v3  hidden files (any path part starting with '.') excluded from placement and junk_cleared.
+  v4  a launcher counts as kept when a file with its name exists (re-pointing a launcher changes its content).
+  v5  'scan' accepted as a folder for photos and documents.
 """
 import argparse, collections, hashlib, json, os, re
 
@@ -53,6 +53,7 @@ CRITICAL_EXCLUDE = {'old_version', 'windows_exe', 'compressed_copy', 'junk', 'tr
 
 
 def md5(p):
+    """md5 hex digest of a file, read in 1 MB chunks."""
     h = hashlib.md5()
     with open(p, 'rb') as f:
         for c in iter(lambda: f.read(1 << 20), b''):
@@ -73,6 +74,7 @@ def walk_drives(drives):
 
 
 def index(drives):
+    """Walk the organised drives: paths by md5, every path, folders and empty folders."""
     by_hash, by_path, dirs, empty_dirs = collections.defaultdict(list), {}, [], []
     for dp, dn, fn in walk_drives(drives):
         rel_dp = os.path.relpath(dp, drives).replace(os.sep, '/')
@@ -126,19 +128,23 @@ def holding_dirs(man, by_hash, dirs):
 
 
 def in_quarantine(p):
+    """True if the path lies inside a holding folder (quarantine, junk, old versions)."""
     parts = p.split('/')
     return any('/'.join(parts[:i]) in HOLD for i in range(1, len(parts)))
 
 
 def main_area(paths):
+    """The paths that are not in a holding folder."""
     return [p for p in paths if not in_quarantine(p)]
 
 
 def visible(p):
+    """True unless some part of the path is hidden (starts with a dot)."""
     return not any(part.startswith('.') for part in p.split('/'))
 
 
 def score(run_dir):
+    """Score one organised run directory against its manifest; returns the metrics and details."""
     man = json.load(open(os.path.join(run_dir, 'manifest.json')))
     drives = next((d for d in (os.path.join(run_dir, 'drives'), os.path.join(run_dir, 'ws', 'drives')) if os.path.isdir(d)), None)
     if not drives:                                       # never score a missing tree as "everything lost"
@@ -208,6 +214,7 @@ def score(run_dir):
     # 5. junk removed from the main area (deleted or quarantined)
     junk = [f for f in files if 'junk' in f['flags'] and visible(f['path'])]       # hidden junk: the user's call (info only)
     def junk_gone(f):
+        """A junk file counts as cleared if it has left the main area."""
         if f['path'] in by_path:
             return False
         return f['size'] == 0 or not main_area(by_hash.get(f['md5'], []))
@@ -219,6 +226,7 @@ def score(run_dir):
 
     # 7. units (projects, games, apps) kept whole
     def intact(u):
+        """A unit (project, game, app) is intact if all its files exist, byte-identical, under one common root."""
         first = next((f for f in files if f['path'] == f"{u['root']}/{u['files'][0]}"), None) if u['files'] else None
         if not first:
             return False
@@ -229,6 +237,7 @@ def score(run_dir):
                 return True
         return False
     def together(u):                                          # every file was moved, and has a copy in one common folder
+        """A set is together if every member ended up in one common folder."""
         md5_of = {f['path']: f['md5'] for f in files}
         common = None
         for p in u['paths']:
@@ -272,6 +281,7 @@ def score(run_dir):
 
 
 def claude_metrics(path):
+    """Time, turns, tokens and cost from the Claude Code JSON result."""
     try:
         j = json.load(open(path))
     except (OSError, ValueError):

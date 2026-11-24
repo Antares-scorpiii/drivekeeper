@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run every organiser skill on the same seeded datasets, sandboxed, and score the results.
 
-  run_bench.py [--datasets home archive] [--only drivekeeper,composio] [--model claude-sonnet-5-5] [--effort low] [--parallel 3]
+  run_bench.py [--datasets family-pc two-disk-backups] [--only drivekeeper,composio] [--model claude-sonnet-5-5] [--effort low] [--parallel 3]
   Two dataset profiles (make_dataset.py --profile), each a different kind of mess. Run ids are <skill>.<profile>;
-  non-default model/effort runs are tagged, e.g. drivekeeper@opus-5-5-low.home, so they never overwrite the Sonnet runs.
+  non-default model/effort runs are tagged, e.g. drivekeeper@opus-5-5-low.family-pc, so they never overwrite the Sonnet runs.
   run_bench.py --vendor        clone the competitor skills at the pinned commits into bench/vendor/
   --external driveA=/mnt/other/bench   keep that drive of every dataset on another disk (real cross-drive copies)
 
@@ -25,6 +25,7 @@ PROMPT = ("My computer's drives are a mess. Everything is under ./drives (three 
 
 
 def vendor():
+    """Clone each competitor skill into bench/vendor/ at its pinned commit."""
     for c in json.load(open(os.path.join(HERE, 'competitors.json'))):
         if not c.get('commit'):
             continue
@@ -37,6 +38,7 @@ def vendor():
 
 
 def dataset(profile):
+    """Generate a dataset profile once (seed 1) into bench/work/datasets/ and return its path."""
     d = os.path.join(WORK, 'datasets', profile)
     if not os.path.exists(os.path.join(d, 'manifest.json')):
         subprocess.run([sys.executable, '-I', os.path.join(HERE, 'make_dataset.py'), '--profile', profile, '--seed', '1', '--out', d], check=True)
@@ -44,6 +46,7 @@ def dataset(profile):
 
 
 def one(c, profile, model, timeout, effort=None, external=()):
+    """Run one skill on one dataset in the bubblewrap sandbox, then score it into bench/results/."""
     tag = '' if model == DEFAULT_MODEL and not effort else '@' + model.replace('claude-', '') + (f'-{effort}' if effort else '')
     rid = f"{c['id']}{tag}.{profile}"
     run = os.path.join(WORK, 'runs', rid)
@@ -104,7 +107,7 @@ def one(c, profile, model, timeout, effort=None, external=()):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('--datasets', nargs='+', default=['home', 'archive'], choices=['home', 'archive'])
+    ap.add_argument('--datasets', nargs='+', default=['family-pc', 'two-disk-backups'], choices=['family-pc', 'two-disk-backups'])
     ap.add_argument('--only')
     ap.add_argument('--model', default=DEFAULT_MODEL)
     ap.add_argument('--effort', choices=['low', 'medium', 'high', 'xhigh', 'max'])
