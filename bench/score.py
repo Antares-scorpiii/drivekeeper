@@ -59,9 +59,21 @@ def md5(p):
     return h.hexdigest()
 
 
+def walk_drives(drives):
+    """os.walk, but a drive that is a symlink (kept on another disk by run_bench --external) is followed."""
+    for top in sorted(os.listdir(drives)):
+        root = os.path.join(drives, top)
+        if os.path.islink(root):
+            real = os.path.realpath(root)
+            for dp, dn, fn in os.walk(real):
+                yield root + dp[len(real):], dn, fn
+        elif os.path.isdir(root):
+            yield from os.walk(root)
+
+
 def index(drives):
     by_hash, by_path, dirs, empty_dirs = collections.defaultdict(list), {}, [], []
-    for dp, dn, fn in os.walk(drives):
+    for dp, dn, fn in walk_drives(drives):
         rel_dp = os.path.relpath(dp, drives).replace(os.sep, '/')
         if rel_dp != '.':
             dirs.append(rel_dp)

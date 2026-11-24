@@ -16,6 +16,7 @@
 | `labels` | Path prefix → short name. Used for quarantine folders and clash suffixes (`photo (data2).jpg`) |
 | `scan` | Source folders that must be fully covered by rules. Files with no rule are reported as UNPLANNED and left alone. Folders in `scan` that end up with no files are moved to `quarantine/…/Empty folders` |
 | `logs` | Rename-log name → CSV path. Rules with `"log": "<name>"` append `old path, new path, date` there |
+| `log_dir` | Optional. Where `Drivekeeper move log <date>.csv` is written on `--apply` (default: the folder holding the quarantine). `organise.py --undo <log>` reverses it |
 
 ## Rules (processed top to bottom; the first rule covering a path wins)
 

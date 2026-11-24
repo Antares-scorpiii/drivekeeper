@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Read-only survey helpers. Never moves or changes anything.
 
+  inventory.py overview ROOT [ROOT...]       everything below in one call, capped output (start here)
   inventory.py survey ROOT [--depth 2]       per-folder size / file count / top extensions (no file dump)
-  inventory.py dups ROOT [ROOT...]           duplicates: same name+size, CONFIRMED by md5 (writes dups.csv)
+  inventory.py dups ROOT [ROOT...]           duplicates: same size, CONFIRMED by md5, any name (writes dups.csv)
   inventory.py hidden ROOT [ROOT...]         hidden files/folders, split into "content" vs "app/project config"
   inventory.py dates ROOT                    date range found in file names per folder (phone dumps, exports)
+  inventory.py links ROOT [ROOT...]          symlinks and launchers (.desktop/.lnk/.url) with their targets
   inventory.py drives                        mounted drives / volumes with size, used, free (Linux, macOS, Windows)
 
 Works on Linux, macOS and Windows (Python 3.8+, stdlib only). Hidden = dot-name, or the Windows hidden attribute.
@@ -51,22 +53,24 @@ def md5(p):
 
 
 def dups(roots):
-    groups = collections.defaultdict(list)
+    by_size = collections.defaultdict(list)                       # only files sharing a size can be identical
     for r in roots:
         for dp, _, fn in walk(r):
             for f in fn:
                 p = os.path.join(dp, f)
                 if os.path.isfile(p) and not os.path.islink(p) and os.path.getsize(p) > 0:
-                    groups[(f, os.path.getsize(p))].append(p)
-    confirmed, traps = [], 0
-    for (name, s), ps in groups.items():
+                    by_size[os.path.getsize(p)].append(p)
+    confirmed, names = [], collections.defaultdict(set)
+    for s, ps in by_size.items():
         if len(ps) < 2:
             continue
         by_hash = collections.defaultdict(list)
         for p in ps:
-            by_hash[md5(p)].append(p)
-        traps += len(by_hash) > 1                      # same name+size but different content: NOT duplicates
+            h = md5(p)
+            by_hash[h].append(p)
+            names[(os.path.basename(p), s)].add(h)
         confirmed += [(h, s, p) for h, g in by_hash.items() if len(g) > 1 for p in g]
+    traps = sum(len(hs) > 1 for hs in names.values())             # same name+size, different content: NOT duplicates
     with open('dups.csv', 'w', newline='') as f:
         csv.writer(f).writerows([('md5', 'bytes', 'path')] + sorted(confirmed))
     n = len({h for h, _, _ in confirmed})
@@ -82,7 +86,7 @@ def is_hidden(path, name):
     return bool(attrs & getattr(stat, 'FILE_ATTRIBUTE_HIDDEN', 2))
 
 
-def hidden(roots):
+def hidden(roots, limit=300):
     content, functional = [], collections.Counter()
     for r in roots:
         for dp, dn, fn in os.walk(r):
@@ -96,7 +100,7 @@ def hidden(roots):
             dn[:] = [d for d in dn if d not in FUNCTIONAL]
     print('functional (leave hidden):', dict(functional.most_common(15)))
     print(f'{len(content)} hidden items that may hold content (thumbnails, .trashed-*, .pending, markers):')
-    for p in content[:300]:
+    for p in content[:limit]:
         s = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(p) for f in fs) if os.path.isdir(p) else os.path.getsize(p)
         print(f'  {s:>10}  {p}')
 
@@ -128,15 +132,58 @@ def drives():
     print('(decimal GB; Explorer/Dolphin/df -h show GiB, about 7% smaller numbers)')
 
 
-def dates(root):
+def dates(root, limit=None):
     rng = collections.defaultdict(list)
     for dp, _, fn in walk(root):
         for f in fn:
             m = DATE.search(f)
             if m:
                 rng[os.path.relpath(dp, root)].append(''.join(m.groups()))
-    for k, v in sorted(rng.items()):
+    for k, v in sorted(rng.items())[:limit]:
         print(f'{min(v)} → {max(v)}  {len(v):6} files  {k}')
+    if limit and len(rng) > limit:
+        print(f'… {len(rng) - limit} more folders (run: inventory.py dates {root})')
+
+
+LAUNCHER = ('.desktop', '.lnk', '.url', '.webloc')
+
+
+def links(roots, limit=100):
+    """Symlinks and launchers: after a move they may point at the old place."""
+    out = []
+    for r in roots:
+        for dp, dn, fn in os.walk(r):
+            for x in dn + fn:
+                p = os.path.join(dp, x)
+                if os.path.islink(p):
+                    t = os.readlink(p)
+                    ok = os.path.exists(os.path.join(dp, t))
+                    out.append(f'  symlink{"" if ok else " (BROKEN)"}  {p} -> {t}')
+                elif x.lower().endswith(LAUNCHER) and os.path.isfile(p):
+                    try:
+                        with open(p, errors='replace') as f:
+                            txt = f.read(4000)
+                    except OSError:
+                        txt = ''
+                    targets = re.findall(r'^(?:Exec|Path|URL)=(.*)$', txt, re.M)
+                    out.append(f'  launcher  {p}  {"; ".join(targets)[:160] or "(binary .lnk: check by hand)"}')
+    print(f'{len(out)} symlinks/launchers (the engine re-points those whose target it moves; check the rest after apply):')
+    print(*out[:limit], sep='\n')
+
+
+def overview(roots):
+    for r in roots:
+        print(f'== survey {r}')
+        survey(r, 2)
+    for r in roots:
+        print(f'== dates {r}')
+        dates(r, limit=40)
+    print('== hidden')
+    hidden(roots, limit=40)
+    print('== links')
+    links(roots, limit=40)
+    print('== dups')
+    dups(roots)
 
 
 if __name__ == '__main__':
@@ -153,4 +200,4 @@ if __name__ == '__main__':
         del argv[i:i + 2]
     cmd, args = sys.argv[1], argv
     {'survey': lambda: survey(args[0], depth), 'dups': lambda: dups(args), 'hidden': lambda: hidden(args),
-     'dates': lambda: dates(args[0])}[cmd]()
+     'dates': lambda: dates(args[0]), 'links': lambda: links(args), 'overview': lambda: overview(args)}[cmd]()

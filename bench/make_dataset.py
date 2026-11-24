@@ -22,7 +22,7 @@ Plus unseen(): cases the skill was not written for (RAW+JPEG / Live Photo / mult
 EXIF-only dates, near-duplicates, folder copies, triple copies, case/Unicode-normalisation collisions, shell-hostile
 names, deep nesting, wrong extensions, mail/design/font/VM/database files, corrupt + nested archives, a prompt
 injection, a 25 MB file, read-only files, empty-but-needed project files, a big node_modules, links, Windows
-system folders, ambiguous document names). Default --scale 2 (~1.7k files).
+system folders, ambiguous document names). Default scale: home ≈ 1.9k files, archive ≈ 5k files.
 """
 import argparse, gzip, hashlib, io, json, os, random, re, sys, tarfile, unicodedata, zipfile
 from datetime import datetime, timedelta
@@ -650,12 +650,12 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--seed', type=int, default=1)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--scale', type=float, default=2.0)
+    ap.add_argument('--scale', type=float, help='default: 2 for home, 20 for archive')
     ap.add_argument('--profile', choices=['home', 'archive'], default='home')
     a = ap.parse_args()
     if os.path.exists(os.path.join(a.out, 'drives')):
         raise SystemExit(f'{a.out}/drives already exists — choose an empty --out')
-    g = Gen(a.seed, a.out, a.scale)
+    g = Gen(a.seed, a.out, a.scale or {'home': 2, 'archive': 20}[a.profile])
     g.build(a.profile)
     m = g.write()
     total = sum(f.get('size', 0) for f in g.files)

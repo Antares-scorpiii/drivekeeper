@@ -9,13 +9,18 @@ Reorganise files across one or more drives so that **nothing is ever lost**, eve
 and reviewable, and the result is a layout the user can navigate. The engine (`scripts/organise.py`)
 does the moving; your job is the survey, the plan, and the judgement.
 
+**The interface is documented; don't read the scripts' source.** Running a script without arguments prints its
+usage, and `references/plan-format.md` describes every plan rule. Reading the code only fills your context.
+
 ## Non-negotiable rules
 
 1. **Never delete. Never overwrite.** Anything removable (duplicates, old versions, compressed copies,
    junk, empty folders, Windows-only installers on Linux…) goes to a quarantine folder
    (`_to_be_deleted/from <drive>/<category>/<original path>`) for the user to review and empty.
-2. **Duplicates need proof.** Same name + size is only a candidate; confirm with md5. Same name, different
-   content → keep both (the engine adds a ` (label)` suffix).
+2. **Duplicates need proof.** Same size is only a candidate; confirm with md5. Same name, different content → keep
+   both (the engine adds a ` (label)` suffix). Resized, re-encoded or edited copies are *not* duplicates, and an
+   "old version" goes to the quarantine only when a newer copy of the same document is clearly kept; when unsure,
+   keep it and list it in the report. The quarantine must be safe to empty.
 3. **Nothing moves without a dry run.** Dry run → read the CSV for surprises → only then `--apply`.
    Unless the user has explicitly pre-approved autonomous execution, show the summary and wait for "apply".
 4. **Every file needs a rule.** `organise.py plan.json --check` must report 0 UNPLANNED files before applying.
@@ -42,11 +47,10 @@ does the moving; your job is the survey, the plan, and the judgement.
 Use `python3` on Linux/macOS, `py -3` (or `python`) on Windows. Scripts are stdlib-only.
 ```bash
 python3 scripts/inventory.py drives                      # every volume: size / used / free (decimal GB)
-python3 scripts/inventory.py survey <root> --depth 2     # size / count / top extensions per folder
-python3 scripts/inventory.py dates <root>                # date ranges in names (phone dumps, exports)
-python3 scripts/inventory.py hidden <root>...            # hidden content vs app config (dot-names + Windows hidden attribute)
-python3 scripts/inventory.py dups <root>...              # md5-confirmed duplicates → dups.csv
+python3 scripts/inventory.py overview <root>...          # ONE call: survey, dates, hidden, links, dups (→ dups.csv)
 ```
+Then only what you still need: `survey <root> --depth 3`, `dates <root>`, `hidden <root>...`, `links <root>...`,
+`dups <root>...` (md5-confirmed, any name).
 Also learn which volumes share a physical disk (Linux `lsblk`, Windows `Get-Partition` / Disk Management) and
 the file system of each (NTFS, ext4, btrfs, APFS, exFAT) — it decides where games/code may live and what a
 "move" costs.
@@ -69,6 +73,10 @@ before broad ones. Use `"log"` on renames to keep an old→new record. Use `"rou
 WhatsApp / screenshot dumps (sorted into `Camera/YYYY/YYYY-MM`). Use `"dedupe"` when you know which copy to
 keep. List every source folder in `"scan"` so nothing is forgotten.
 
+**Pre-approved, user away?** Skip the Markdown plan and the review rounds: survey → `plan.json` → `--check` until 0
+UNPLANNED → one dry run (read the printed counts; grep the CSV for `CLASH` and for `DUPLICATE`/quarantine lines
+that hit files you meant to keep) → `--apply` → verify. Put the layout and every judgement call in the final report.
+
 ### 4. Check, dry run, review
 ```bash
 python3 scripts/organise.py --selftest            # engine sanity check (temp folder)
@@ -87,9 +95,16 @@ any OS: free space of each drive. Re-running after an interruption is safe (alre
 
 ### 6. Verify and hand over
 Exit code 0; no `*.part` files left (search for them); MISSING/UNPLANNED = 0; old source folders gone or only quarantined;
-free space matches the plan. Give the user: a final map (where everything lives), the quarantine summary,
-and follow-ups (rebuild virtualenvs: `rm -rf .venv && uv sync` / `npm install`; fix launchers that point
-at old paths; empty quarantine when satisfied).
+free space matches the plan.
+
+The engine writes **`Drivekeeper move log <date>.csv`** next to the quarantine (every move, old → new) and
+re-points symlinks and `.desktop`/`.url` launchers whose target it moved (`RELINK` lines).
+`python3 scripts/organise.py --undo "<move log>"` puts everything back. Launchers that name the moved folder by
+another path (a different mount point, `.lnk` files): update them yourself, or list them for the user.
+
+Give the user: a final map (where everything lives), the quarantine summary, the move-log path and the undo
+command, and follow-ups (rebuild virtualenvs: `rm -rf .venv && uv sync` / `npm install`; empty the quarantine when
+satisfied).
 
 ## Lessons that prevent real damage
 See `references/lessons.md`. The short version: record a file's size/hash *before* moving it; never let a

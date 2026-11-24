@@ -50,7 +50,9 @@ Drivekeeper splits the job in two:
 | **Sorts phone dumps** | `IMG_/PXL_/VID_` dates go to `Camera/YYYY/YYYY-MM`, plus WhatsApp, Screenshots and Snapchat |
 | **Archives** | `.zip`/`.tar` are extracted with Python (blocks zip-slip, never overwrites) and size-checked, then the archive is quarantined. `.7z`/`.rar` need 7-Zip |
 | **Asks about the grey areas** | Hidden and app-managed files (thumbnail caches, a phone's "recently deleted", markers) are reported and left alone until you decide. OS folders (trash, `System Volume Information`) are never reorganised |
-| **Keeps the context small** | `inventory.py` summarises (sizes, extensions, date ranges, hidden content, duplicates) instead of dumping file lists into the context |
+| **Keeps the context small** | `inventory.py overview` summarises everything in one call (sizes, extensions, date ranges, hidden content, links, md5-confirmed duplicates under any name) instead of dumping file lists into the context |
+| **Move log and undo** | Every move is written to `Drivekeeper move log <date>.csv` next to the quarantine; `organise.py --undo <log>` puts everything back |
+| **Keeps links working** | Symlinks and `.desktop`/`.url` launchers that point into a moved folder are re-pointed (and restored by undo) |
 | **Resumable** | Re-running after an interruption is safe: already-moved files show up as `MISSING` |
 
 ## Install
@@ -108,12 +110,12 @@ Merge the three phone backups on D:\ and E:\ into one Pictures\Phone library, so
 
 A session goes like this:
 
-1. **Survey (read-only).** Claude runs `inventory.py drives | survey | dates | hidden | dups` and reports what's where.
+1. **Survey (read-only).** Claude runs `inventory.py drives` and `inventory.py overview` and reports what's where.
 2. **Agree on a layout.** Claude proposes "where does X live" (a neutral default is in `references/layout.md`) and asks about anything ambiguous.
 3. **Write a plan.** The agreed layout becomes `plan.json`: move, rename, phone routing, quarantine, dedupe and extract rules.
 4. **Check and dry run.** `--check` must report 0 unplanned files; the dry-run CSV is reviewed for surprises.
 5. **Apply.** Runs with progress output, and big jobs run in the background.
-6. **Verify and hand over.** No `.part` files left, a final map of where everything lives, a quarantine summary and follow-ups (rebuild virtualenvs, fix launchers).
+6. **Verify and hand over.** No `.part` files left, a final map of where everything lives, a quarantine summary, the move log and undo command, and follow-ups (rebuild virtualenvs).
 
 Claude waits for your "apply" unless you've explicitly pre-approved it.
 
@@ -286,7 +288,6 @@ default font otherwise.
 ## Roadmap and ideas
 
 - [ ] Verified runs on Windows and macOS (CI matrix for `--selftest`)
-- [ ] One-command undo from the apply log
 - [ ] Near-duplicate photos (perceptual hash) flagged for review, never auto-quarantined
 - [ ] EXIF and metadata dates for camera files whose names carry no date
 - [ ] More benchmark metrics: destructive commands per run (from transcripts), questions asked, files handled per 1K tokens

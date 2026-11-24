@@ -4,7 +4,9 @@
   run_bench.py [--datasets home archive] [--only drivekeeper,composio] [--model claude-sonnet-5-5] [--effort low] [--parallel 3]
   Two dataset profiles (make_dataset.py --profile), each a different kind of mess. Run ids are <skill>.<profile>;
   non-default model/effort runs are tagged, e.g. drivekeeper@opus-5-5-low.home, so they never overwrite the Sonnet runs.
-  run_bench.py --vendor        clone the competitor skills at the pinned commits into bench/vendor/
+  run_bench.py --vendor        clone the competitor skills at the pinned commits into bench/vendor/, and export
+                               earlier Drivekeeper versions from their git tags
+  --external driveA=/mnt/other/bench   keep that drive of every dataset on another disk (real cross-drive copies)
 
 Linux only (uses bubblewrap): each run sees the whole system read-only, an empty $HOME, a writable copy of the
 dataset and a throw-away Claude config holding just that one skill. The ground-truth manifest is outside the
@@ -25,6 +27,12 @@ PROMPT = ("My computer's drives are a mess. Everything is under ./drives (three 
 
 def vendor():
     for c in json.load(open(os.path.join(HERE, 'competitors.json'))):
+        if c.get('git_tag'):                           # an earlier Drivekeeper version, from this repo's history
+            dest = os.path.join(HERE, 'vendor', c['id'])
+            os.makedirs(dest, exist_ok=True)
+            arc = subprocess.run(['git', '-C', os.path.dirname(HERE), 'archive', c['git_tag'], 'skills/drivekeeper'], check=True, capture_output=True).stdout
+            subprocess.run(['tar', '-x', '-C', dest], input=arc, check=True)
+            print('ok', c['id'], c['git_tag'])
         if not c.get('commit'):
             continue
         repo = c['source'].split('github.com/')[1]
@@ -42,7 +50,7 @@ def dataset(profile):
     return d
 
 
-def one(c, profile, model, timeout, effort=None):
+def one(c, profile, model, timeout, effort=None, external=()):
     tag = '' if model == DEFAULT_MODEL and not effort else '@' + model.replace('claude-', '') + (f'-{effort}' if effort else '')
     rid = f"{c['id']}{tag}.{profile}"
     run = os.path.join(WORK, 'runs', rid)
@@ -51,7 +59,16 @@ def one(c, profile, model, timeout, effort=None):
         shutil.rmtree(run)
     os.makedirs(cfg)
     src = dataset(profile)
-    shutil.copytree(os.path.join(src, 'drives'), os.path.join(ws, 'drives'), symlinks=True)
+    shutil.copytree(os.path.join(src, 'drives'), os.path.join(ws, 'drives'), symlinks=True,
+                    ignore=lambda d, names: [n for n in names if d == os.path.join(src, 'drives') and n in dict(external)])
+    binds = []
+    for name, base in external:                        # this drive lives on another disk, mounted into the sandbox
+        far = os.path.join(base, rid, name)
+        if os.path.exists(os.path.dirname(far)):
+            shutil.rmtree(os.path.dirname(far))
+        shutil.copytree(os.path.join(src, 'drives', name), far, symlinks=True)
+        os.makedirs(os.path.join(ws, 'drives', name))
+        binds += ['--bind', far, os.path.join(ws, 'drives', name)]
     shutil.copy2(os.path.join(src, 'manifest.json'), os.path.join(run, 'manifest.json'))   # outside ws: invisible in the sandbox
     shutil.copy2(os.path.join(HOME, '.claude', '.credentials.json'), os.path.join(cfg, '.credentials.json'))
     prompt = PROMPT
@@ -62,7 +79,7 @@ def one(c, profile, model, timeout, effort=None):
     cmd = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', HOME,
            '--ro-bind', f'{HOME}/.local/bin', f'{HOME}/.local/bin',
            '--ro-bind', f'{HOME}/.local/share/claude', f'{HOME}/.local/share/claude',
-           '--bind', ws, ws, '--bind', cfg, cfg, '--chdir', ws,
+           '--bind', ws, ws, *binds, '--bind', cfg, cfg, '--chdir', ws,
            '--setenv', 'CLAUDE_CONFIG_DIR', cfg, '--setenv', 'HOME', HOME, '--die-with-parent', '--',
            f'{HOME}/.local/bin/claude', '-p', prompt, '--model', model, '--output-format', 'json',
            '--dangerously-skip-permissions', '--max-turns', '300'] + (['--effort', effort] if effort else [])
@@ -74,6 +91,10 @@ def one(c, profile, model, timeout, effort=None):
     except subprocess.TimeoutExpired as e:
         out, status, err = (e.stdout or b'').decode() if isinstance(e.stdout, bytes) else (e.stdout or ''), 'timeout', ''
     wall = time.time() - t0
+    for name, base in external:                        # let the scorer see the far drive where the sandbox saw it
+        mp = os.path.join(ws, 'drives', name)
+        os.rmdir(mp)
+        os.symlink(os.path.join(base, rid, name), mp)
     os.makedirs(RES, exist_ok=True)
     raw = os.path.join(RES, f'{rid}.claude.json')
     try:
@@ -97,6 +118,7 @@ if __name__ == '__main__':
     ap.add_argument('--parallel', type=int, default=3)
     ap.add_argument('--timeout', type=int, default=45 * 60)
     ap.add_argument('--vendor', action='store_true')
+    ap.add_argument('--external', action='append', default=[], metavar='DRIVE=DIR')
     a = ap.parse_args()
     if a.vendor:
         vendor()
@@ -108,5 +130,5 @@ if __name__ == '__main__':
         dataset(d)
     jobs = [(c, d) for d in a.datasets for c in comps]
     with cf.ThreadPoolExecutor(a.parallel) as ex:
-        for f in cf.as_completed([ex.submit(one, c, s, a.model, a.timeout, a.effort) for c, s in jobs]):
+        for f in cf.as_completed([ex.submit(one, c, s, a.model, a.timeout, a.effort, tuple(e.split('=', 1) for e in a.external)) for c, s in jobs]):
             f.result()

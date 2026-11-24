@@ -3,7 +3,9 @@
 
   organise.py plan.json             dry run (default): changes nothing, writes <plan>-dryrun.csv
   organise.py plan.json --check     only lists UNPLANNED files (no rule covers them)
-  organise.py plan.json --apply     does it, writes <plan>-log.csv (+ rename logs)
+  organise.py plan.json --apply     does it, then re-points symlinks/launchers whose target moved; writes the move
+                                    log next to the quarantine ("Drivekeeper move log <date>.csv", + rename logs)
+  organise.py --undo LOG.csv        moves everything in a move log back (newest first), restores links
   organise.py --selftest            tests the engine on a throw-away folder
 
 Plan (JSON):
@@ -347,6 +349,31 @@ class Engine:
             seven = shutil.which('7z') or shutil.which('7z.exe') or shutil.which('7za')
             subprocess.run([seven, 'x', '-aos', '-bso0', '-bsp0', f'-o{dst}', src], check=True)   # -aos: never overwrite
 
+    def relink(self):
+        """Re-point symlinks and launchers (.desktop/.url) that point into anything this run moved, and relative
+        symlinks that were moved themselves. Logged as RELINK, reversed by --undo."""
+        moved = {s: d for a, s, d, *_ in self.log if a in MOVED_ACTIONS}
+        if not moved:
+            return
+        back = {d: s for s, d in moved.items()}
+        roots = {norm(r) for r in list(self.labels) + self.plan.get('scan', []) if os.path.isdir(r)}
+        for root in [r for r in roots if not any(r != o and r.startswith(o + SEP) for o in roots)]:
+            for dp, dn, fn in os.walk(root):
+                for x in dn + fn:
+                    p = os.path.join(dp, x)
+                    if os.path.islink(p):
+                        t = os.readlink(p)
+                        was_dir = os.path.dirname(follow(p, back))       # where the link lived before this run
+                        target = norm(t if os.path.isabs(t) else os.path.join(was_dir, t))
+                        final = follow(target, moved)
+                        new = final if os.path.isabs(t) else os.path.relpath(final, dp)
+                        if new != t:
+                            os.unlink(p)
+                            os.symlink(new, p)
+                            self.note('RELINK', p, new, 0, f'symlink was -> {t}')
+                    elif x.lower().endswith(('.desktop', '.url')) and os.path.isfile(p) and rewrite_paths(p, moved):
+                        self.note('RELINK', p, '', 0, 'launcher: moved paths updated')
+
     def sweep_empty(self):
         for root in map(norm, self.plan.get('scan', [])):
             if os.path.isdir(root) and not any(fn for _, _, fn in os.walk(root)):
@@ -358,9 +385,15 @@ class Engine:
             self.note('UNPLANNED', p, '', os.lstat(p).st_size, 'no rule covers it: left where it is')
         for op in self.ops:
             self.run_op(op)
+        log = out_prefix + '-dryrun.csv'
         if self.apply:
             self.sweep_empty()
-        with open(out_prefix + ('-log.csv' if self.apply else '-dryrun.csv'), 'w', newline='') as f:
+            self.relink()
+            log = os.path.join(self.plan.get('log_dir') or os.path.dirname(self.q),
+                               f'Drivekeeper move log {time.strftime("%Y-%m-%d %H%M%S")}.csv')
+            os.makedirs(os.path.dirname(log), exist_ok=True)
+        self.log_path = log
+        with open(log, 'w', newline='') as f:
             w = csv.writer(f)
             w.writerow(['action', 'source', 'destination', 'bytes', 'info'])
             w.writerows(self.log)
@@ -377,6 +410,71 @@ class Engine:
                     w.writerow(['old path', 'new path', 'date'])
                 w.writerows((a, b, time.strftime('%Y-%m-%d')) for a, b in rows)
         return self.stats
+
+
+MOVED_ACTIONS = ('MOVE', 'MOVE-FOLDER', 'COPY+VERIFY+REMOVE')
+
+
+def follow(p, mapping):
+    """Where p is after applying mapping to p or its nearest mapped parent folder."""
+    q = p
+    while True:
+        if q in mapping:
+            return mapping[q] + p[len(q):]
+        parent = os.path.dirname(q)
+        if parent == q or not parent:
+            return p
+        q = parent
+
+
+def rewrite_paths(path, mapping):
+    """Replace whole-path occurrences of mapping keys inside a small text file (launchers). True if changed."""
+    try:
+        with open(path, encoding='utf-8', errors='surrogateescape') as f:
+            txt = f.read(1 << 20)
+    except OSError:
+        return False
+    keys = sorted(mapping, key=len, reverse=True)
+    pat = re.compile('(' + '|'.join(map(re.escape, keys)) + r')(?=$|[/\\\s"\'])', re.M)
+    new = pat.sub(lambda m: mapping[m.group(1)], txt)
+    if new == txt:
+        return False
+    with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
+        f.write(new)
+    return True
+
+
+def undo(log_path):
+    """Reverse a move log: newest move first; never overwrites (an occupied original path is skipped and reported)."""
+    with open(log_path, newline='') as f:
+        rows = list(csv.reader(f))[1:]
+    eng = Engine({'quarantine': os.path.dirname(os.path.abspath(log_path))}, apply=True)
+    moved = {r[1]: r[2] for r in rows if r[0] in MOVED_ACTIONS}
+    back = {d: s for s, d in moved.items()}
+    for action, src, dst, size, info in reversed(rows):
+        if action == 'RELINK':
+            if os.path.islink(src) and info.startswith('symlink was -> '):
+                os.unlink(src)
+                os.symlink(info[len('symlink was -> '):], src)
+            elif os.path.isfile(src):
+                rewrite_paths(src, back)
+            eng.note('UNDO-RELINK', src)
+        elif action in MOVED_ACTIONS:
+            if not os.path.lexists(dst):
+                eng.note('UNDO-SKIPPED', dst, src, 0, 'no longer at the destination')
+            elif os.path.lexists(src):
+                eng.note('UNDO-SKIPPED', dst, src, 0, 'something is already at the original path')
+            else:
+                os.makedirs(os.path.dirname(src), exist_ok=True)
+                if os.path.isdir(dst) and not os.path.islink(dst) or eng.dev(dst) == eng.dev(src):
+                    os.rename(dst, src)
+                else:
+                    eng.copy_verified(dst, src)
+                eng.note('UNDO-MOVE', dst, src, int(size or 0))
+    out = os.path.splitext(log_path)[0] + ' - undo.csv'
+    with open(out, 'w', newline='') as f:
+        csv.writer(f).writerows([('action', 'from', 'back to', 'bytes', 'info')] + eng.log)
+    return eng.stats, out
 
 
 def selftest():
@@ -428,6 +526,29 @@ def selftest():
             raise AssertionError('zip-slip not blocked')
         except SystemExit:
             pass
+        # relink (symlink into a moved folder, a moved relative symlink, a launcher) and undo
+        R = f'{d}/R'
+        os.makedirs(f'{R}/Games/Lantern')
+        open(f'{R}/Games/Lantern/run.sh', 'w').write('x')
+        os.makedirs(f'{R}/Desk')
+        open(f'{R}/Desk/Lantern.desktop', 'w').write(f'[Desktop Entry]\nPath={R}/Games/Lantern\nExec={R}/Games/Lantern/run.sh\n')
+        os.symlink(f'{R}/Games/Lantern', f'{R}/Desk/lantern-abs')
+        os.symlink('../Games/Lantern', f'{R}/Desk/lantern-rel')
+        os.makedirs(f'{R}/Old')
+        open(f'{R}/Old/a.txt', 'w').write('a')
+        os.symlink('a.txt', f'{R}/Old/a-link')
+        e3 = Engine({'quarantine': f'{R}/_q', 'labels': {R: 'R'}, 'rules': [
+            {'move': f'{R}/Games/Lantern', 'to': f'{R}/Play/Lantern'}, {'move': f'{R}/Old/a-link', 'to': f'{R}/New/'}]}, apply=True)
+        e3.run(f'{d}/test3')
+        assert open(f'{R}/Desk/Lantern.desktop').read().count(f'{R}/Play/Lantern') == 2
+        assert os.path.realpath(f'{R}/Desk/lantern-abs') == f'{R}/Play/Lantern'
+        assert os.readlink(f'{R}/Desk/lantern-rel') == '../Play/Lantern' and os.path.isfile(f'{R}/Desk/lantern-rel/run.sh')
+        assert open(f'{R}/New/a-link').read() == 'a' and e3.stats.get('RELINK') == 4
+        assert os.path.dirname(e3.log_path) == R and 'move log' in e3.log_path
+        stats, _ = undo(e3.log_path)
+        assert os.path.isfile(f'{R}/Games/Lantern/run.sh') and os.readlink(f'{R}/Old/a-link') == 'a.txt'
+        assert f'Path={R}/Games/Lantern' in open(f'{R}/Desk/Lantern.desktop').read() and os.readlink(f'{R}/Desk/lantern-rel') == '../Games/Lantern'
+        assert stats.get('UNDO-MOVE') == 2 and not stats.get('UNDO-SKIPPED')
         # cross-device path (.part + md5) exercised directly
         open(f'{A}/q.bin', 'wb').write(os.urandom(2_000_000))
         h0 = e.md5(f'{A}/q.bin')
@@ -440,6 +561,12 @@ if __name__ == '__main__':
     if '--selftest' in sys.argv:
         selftest()
         sys.exit()
+    if len(sys.argv) == 3 and sys.argv[1] == '--undo':
+        stats, out = undo(sys.argv[2])
+        print('UNDONE →', out)
+        for k in sorted(stats):
+            print(f'  {k:20} {stats[k]}')
+        sys.exit()
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     plan_path = sys.argv[1]
@@ -451,6 +578,6 @@ if __name__ == '__main__':
         print(f'{len(miss)} UNPLANNED files'); print(*miss[:200], sep='\n')
         sys.exit(1 if miss else 0)
     stats = eng.run(prefix)
-    print(('APPLIED' if eng.apply else 'DRY RUN, nothing changed'), '→', prefix + ('-log.csv' if eng.apply else '-dryrun.csv'))
+    print(('APPLIED' if eng.apply else 'DRY RUN, nothing changed'), '→', eng.log_path)
     for k in sorted(stats):
         print(f'  {k:20} {stats[k]}')
