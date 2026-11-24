@@ -105,8 +105,8 @@ python3 bench/charts.py
 Writes, for each dataset with results:
 - `bench/results/<dataset>/summary.md` and `summary.csv`: one row per skill;
 - `bench/results/<dataset>/reports/<skill>.md`: scores and the skill's final message to the user;
-- `bench/results/<dataset>/charts/{light,dark}/`: safety, organisation, time, cost, input and output tokens, and a
-  metric heatmap.
+- `bench/results/<dataset>/charts/{light,dark}/`: tokens and cost (input left, output right, cost column), safety,
+  organisation, time, cost, input and output tokens, and a metric heatmap.
 
 And `bench/results/versions/{light,dark}/versions.png`: cost and time of every Drivekeeper release on `family-pc`.
 

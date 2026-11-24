@@ -24,9 +24,9 @@ RES, OUT = os.path.join(HERE, 'results'), os.path.join(HERE, 'charts')
 OURS = 'drivekeeper'
 VERSIONS_DATASET = 'family-pc'
 THEMES = {   # validated with the dataviz validator: clay vs grey passes CVD (ΔE 15.6 light / 9.5 dark) and lightness band
-    'light': dict(surface='#faf9f5', ink='#141413', ink2='#5e5d59', muted='#87867f', grid='#e8e6dc', accent='#c6613f',
+    'light': dict(surface='#faf9f5', ink='#141413', ink2='#5e5d59', muted='#87867f', grid='#e8e6dc', accent='#c6613f', blue='#2f6fb3',
                   other='#b0aea5', ramp=['#f9ebe4', '#f2cdbb', '#e9a98c', '#d97757', '#b4532f', '#7d3519']),
-    'dark': dict(surface='#262624', ink='#faf9f5', ink2='#c2c0b6', muted='#87867f', grid='#3a3a37', accent='#d4704f',
+    'dark': dict(surface='#262624', ink='#faf9f5', ink2='#c2c0b6', muted='#87867f', grid='#3a3a37', accent='#d4704f', blue='#5b8fd6',
                  other='#6b6a65', ramp=['#3a2b25', '#5e3626', '#8c4a30', '#c0623e', '#e08a6d', '#f2c4b0']),
 }
 SKETCH = (0.9, 110, 2)   # path.sketch (scale, length, randomness): a light hand-drawn wobble; None = clean lines
@@ -206,6 +206,51 @@ def reports(dataset, runs, out):
                     '## Final report from the agent (verbatim)\n\n' + result.strip() + '\n')
 
 
+def tokens(dataset, runs, t, path):
+    """Back-to-back bars, one row per skill, cheapest at the top: input tokens grow left (clay), output tokens grow
+    right (blue, own scale: output is ~2% of input), cost as a column of figures. The divide sits at the image centre."""
+    latest = max((s for s in runs if s.startswith(OURS + '-v')), default=None)
+    cost = {s: v[0] for s, v in agg(runs, 'cost_usd').items()}
+    tin = {s: v[0] / 1e6 for s, v in agg(runs, 'input_tokens_total').items()}
+    tout = {s: v[0] / 1e3 for s, v in agg(runs, 'output_tokens').items()}
+    order = sorted(cost, key=cost.get)           # cheapest at the top
+    n = len(order)
+    fig, (axl, axr) = plt.subplots(1, 2, figsize=(8.6, 0.48 * n + 1.9), facecolor=t['surface'], sharey=True,
+                                   )
+    for ax in (axl, axr):
+        style(ax, t)
+        ax.spines['bottom'].set_visible(False)
+        ax.set_xticks([])
+        ax.set_clip_on(False)
+        ax.grid(False)
+    mi, mo = max(tin.values()), max(tout.values())
+    for i, s in enumerate(order):
+        axl.barh(i, tin[s], height=0.52, color=t['accent'], edgecolor=t['surface'], linewidth=2)
+        axr.barh(i, tout[s], height=0.52, color=t['blue'], edgecolor=t['surface'], linewidth=2)
+        axl.text(tin[s] + mi * 0.02, i, f'{tin[s]:.2f}M', ha='right', va='center', color=t['ink2'], fontsize=10)
+        axr.text(tout[s] + mo * 0.02, i, f'{tout[s]:.0f}K', ha='left', va='center', color=t['ink2'], fontsize=10)
+        axr.text(mo * 1.85, i, f'${cost[s]:.2f}', ha='right', va='center', color=t['ink'], fontsize=13,
+                 fontweight='bold' if s.startswith(OURS) else 'normal')
+    axl.set_xlim(mi * 1.25, 0)                                  # input grows to the left
+    axr.set_xlim(0, mo * 1.25)
+    axl.set_yticks(range(n), [s.replace(OURS + '-', OURS + ' ') + (' ★' if s == latest else '') for s in order])
+    for lbl in axl.get_yticklabels():
+        if lbl.get_text().startswith(OURS):
+            lbl.set_color(t['ink']); lbl.set_fontweight('bold')
+    axr.tick_params(left=False)
+    top = -0.75
+    axl.text(mi * 0.02, top, 'Input tokens (millions)', ha='right', va='center', color=t['accent'], fontsize=12, fontweight='bold')
+    axr.text(mo * 0.02, top, 'Output tokens (thousands)', ha='left', va='center', color=t['blue'], fontsize=12, fontweight='bold')
+    axr.text(mo * 1.85, top, 'Cost', ha='right', va='center', color=t['ink'], fontsize=12, fontweight='bold')
+    axl.set_ylim(n - 0.4, -1.05)                                # shared y: set once, top row first
+    fig.text(0.058, 0.985, 'Tokens and cost per run', ha='left', va='top', fontsize=17, fontweight='bold', color=t['ink'])
+    fig.text(0.058, 0.985 - 0.32 / fig.get_figheight(), f'Dataset {dataset}, Sonnet 5.5. Cheapest at the top; lower is better everywhere',
+             ha='left', va='top', fontsize=12, color=t['ink2'])
+    fig.subplots_adjust(left=0.2, right=0.8, bottom=0.03, top=1 - 0.7 / fig.get_figheight(), wspace=0.03)   # centre gap at x=0.5
+    fig.savefig(path, dpi=160, facecolor=t['surface'], bbox_inches='tight', pad_inches=0.08)
+    plt.close(fig)
+
+
 def versions(dataset, runs, out):
     """Drivekeeper releases on one dataset: time as bars (left axis), cost as a line (right axis). Both axes start
     at 0 on the same baseline; the bar axis runs to twice the longest time, so the bars stay below the line.
@@ -291,6 +336,7 @@ def draw(dataset):
         hbar('cost.png', 'Cost per run', 'US dollars, as reported by Claude Code (lower is better)',
              agg(runs, 'cost_usd'), labels, t, lambda v: f'${v:.2f}', lower_better=True)
         heatmap(runs, labels, t, os.path.join(OUT, 'metrics_heatmap.png'))
+        tokens(dataset, runs, t, os.path.join(OUT, 'tokens.png'))
     print(f'{dataset}: {len(runs)} skills → {out}/')
 
 

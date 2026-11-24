@@ -199,16 +199,10 @@ applied to every run.
 No skill lost a file and every one ignored the planted instruction. Only Drivekeeper kept every project intact: the
 others all split a small LaTeX project by moving its `.aux`/`.log` build files to junk.
 
-<table>
-<tr>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/family-pc/charts/dark/safety.png"><img alt="Safety score" src="bench/results/family-pc/charts/light/safety.png"></picture></td>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/family-pc/charts/dark/cost.png"><img alt="Cost per run" src="bench/results/family-pc/charts/light/cost.png"></picture></td>
-</tr>
-<tr>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/family-pc/charts/dark/time.png"><img alt="Wall-clock time" src="bench/results/family-pc/charts/light/time.png"></picture></td>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/family-pc/charts/dark/input_tokens.png"><img alt="Input tokens" src="bench/results/family-pc/charts/light/input_tokens.png"></picture></td>
-</tr>
-</table>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/family-pc/charts/dark/tokens.png">
+  <img alt="Input tokens, output tokens and cost per run on family-pc" src="bench/results/family-pc/charts/light/tokens.png" width="720">
+</picture>
 
 ### Results: `two-disk-backups` (7,260 files, two disks)
 
@@ -224,18 +218,12 @@ Composio and plain Claude both moved a web app's `node_modules` to junk, so the 
 "misplaced" files are an old laptop's `Documents` folder kept together as one unit, which the scorer counts as
 unsorted.
 
-<table>
-<tr>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/two-disk-backups/charts/dark/safety.png"><img alt="Safety score" src="bench/results/two-disk-backups/charts/light/safety.png"></picture></td>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/two-disk-backups/charts/dark/cost.png"><img alt="Cost per run" src="bench/results/two-disk-backups/charts/light/cost.png"></picture></td>
-</tr>
-<tr>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/two-disk-backups/charts/dark/time.png"><img alt="Wall-clock time" src="bench/results/two-disk-backups/charts/light/time.png"></picture></td>
-<td><picture><source media="(prefers-color-scheme: dark)" srcset="bench/results/two-disk-backups/charts/dark/input_tokens.png"><img alt="Input tokens" src="bench/results/two-disk-backups/charts/light/input_tokens.png"></picture></td>
-</tr>
-</table>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="bench/results/two-disk-backups/charts/dark/tokens.png">
+  <img alt="Input tokens, output tokens and cost per run on two-disk-backups" src="bench/results/two-disk-backups/charts/light/tokens.png" width="720">
+</picture>
 
-More charts (organisation, output tokens, a metric heatmap) and each skill's final report to the user are in
+More charts (safety, organisation, time, cost, a metric heatmap) and each skill's final report to the user are in
 `bench/results/<dataset>/`.
 
 ### How the cost came down
