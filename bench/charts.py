@@ -197,6 +197,42 @@ def reports(dataset, runs, out):
                     '## Final report from the agent (verbatim)\n\n' + result.strip() + '\n')
 
 
+def versions(runs, t):
+    """Our releases side by side: cost as bars (left axis), time as a line (right axis). Asked for as one figure."""
+    vs = sorted(s for s in runs if s.startswith(OURS + '-v'))
+    if len(vs) < 2:
+        return
+    cost = [agg(runs, 'cost_usd')[s][0] for s in vs]
+    mins = [agg(runs, 'duration_s')[s][0] / 60 for s in vs]
+    x = range(len(vs))
+    fig, ax = plt.subplots(figsize=(8.2, 5), facecolor=t['surface'])
+    style(ax, t)
+    ax.grid(axis='x', visible=False); ax.grid(axis='y', color=t['grid'], linewidth=0.8)
+    ax.bar(x, cost, width=0.5, color=t['accent'], edgecolor=t['surface'], linewidth=2, label='Cost ($, bars)')
+    for i, c in zip(x, cost):
+        ax.text(i, c / 2, f'${c:.2f}', ha='center', va='center', color=t['surface'], fontsize=14, fontweight='bold')
+    ax.set_ylim(0, max(cost) * 1.3); ax.set_ylabel('Cost per run ($)', color=t['ink2'], fontsize=12)
+    ax.set_xticks(list(x), [s.split('-', 1)[1] for s in vs], fontsize=14)
+    ax2 = ax.twinx(); flat(fig, ax2)
+    for side in ('top', 'left', 'bottom'):
+        ax2.spines[side].set_visible(False)
+    ax2.spines['right'].set_color(t['muted']); ax2.tick_params(colors=t['ink2'], labelsize=12, length=0)
+    ax2.plot(list(x), mins, color=t['ink'], linewidth=2, marker='o', markersize=9,
+             markeredgecolor=t['surface'], markeredgewidth=2, label='Time (min, line)')
+    for i, m in zip(x, mins):
+        ax2.text(i + 0.08, m + max(mins) * 0.05, f'{m:.1f} min', color=t['ink'], fontsize=12)
+    ax2.set_ylim(0, max(mins) * 1.3); ax2.set_ylabel('Wall-clock minutes', color=t['ink2'], fontsize=12)
+    h = ax.get_legend_handles_labels(); h2 = ax2.get_legend_handles_labels()
+    ax.legend(h[0] + h2[0], h[1] + h2[1], loc='upper right', frameon=False, labelcolor=t['ink2'], fontsize=12)
+    d = (1 - cost[-1] / cost[0]) * 100, (1 - mins[-1] / mins[0]) * 100
+    fig.text(0.012, 0.985, 'Drivekeeper releases: cost and time', ha='left', va='top', fontsize=17, fontweight='bold', color=t['ink'])
+    fig.text(0.012, 0.93, f'{vs[0][len(OURS)+1:]} → {vs[-1][len(OURS)+1:]}: {d[0]:.0f}% cheaper, {d[1]:.0f}% faster (lower is better)',
+             ha='left', va='top', fontsize=12, color=t['ink2'])
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    fig.savefig(os.path.join(OUT, 'versions.png'), dpi=160, facecolor=t['surface'])
+    plt.close(fig)
+
+
 def main():
     datasets = sorted({os.path.basename(f).split('.')[-3] for f in glob.glob(os.path.join(RES, '*.score.json'))})
     if not datasets:
@@ -222,10 +258,6 @@ def draw(dataset):
              agg(runs, 'safety_score'), labels, t, pct, xmax=112)
         hbar('organisation.png', 'Organisation score', 'Right folder, duplicates collapsed, junk cleared, sets kept together (0–100)',
              agg(runs, 'organisation_score'), labels, t, pct, xmax=112)
-        lost = agg(runs, 'critical_lost')
-        hbar('data_loss.png', 'Files permanently lost', 'Unique photos, documents, projects… gone from every drive (lower is better)',
-             lost, labels, t, lambda v: f'{v:.0f}', lower_better=True,
-             color_fn=lambda s, v: t['critical'] if v > 0 else (t['accent'] if s.startswith(OURS) else t['other']))
         hbar('time.png', 'Wall-clock time', 'Minutes per run (lower is better)',
              {s: tuple(x / 60 for x in v) for s, v in agg(runs, 'duration_s').items()}, labels, t, lambda v: f'{v:.1f} min', lower_better=True)
         hbar('input_tokens.png', 'Input tokens', 'Fresh + cached input, millions per run (lower is better)',
@@ -235,6 +267,7 @@ def draw(dataset):
         hbar('cost.png', 'Cost per run', 'US dollars, as reported by Claude Code (lower is better)',
              agg(runs, 'cost_usd'), labels, t, lambda v: f'${v:.2f}', lower_better=True)
         heatmap(runs, labels, t, os.path.join(OUT, 'metrics_heatmap.png'))
+        versions(runs, t)
     print(f'{dataset}: {len(runs)} skills → {out}/')
 
 
