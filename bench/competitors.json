@@ -3,6 +3,8 @@
    "source": "this repository, archive/v1.0", "installs": null},
   {"id": "drivekeeper-v1.1", "display": "drivekeeper", "skill_dir": "../archive/v1.1/drivekeeper",
    "source": "this repository, archive/v1.1", "installs": null},
+  {"id": "drivekeeper-v1.2", "display": "drivekeeper", "skill_dir": "../archive/v1.2/drivekeeper",
+   "source": "this repository, archive/v1.2", "installs": null},
   {"id": "composio", "display": "file-organizer", "skill_dir": "vendor/ComposioHQ_awesome-claude-skills/file-organizer",
    "source": "github.com/ComposioHQ/awesome-claude-skills", "commit": "be2a406", "installs": "7.6K"},
   {"id": "claude-office", "display": "File Organizer", "skill_dir": "vendor/claude-office-skills_skills/file-organizer",

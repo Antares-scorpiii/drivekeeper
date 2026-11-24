@@ -3,6 +3,9 @@
 
   organise.py plan.json             dry run (default): changes nothing, writes <plan>-dryrun.csv
   organise.py plan.json --check     only lists UNPLANNED files (no rule covers them)
+  organise.py plan.json --go        pre-approved jobs, one call: stop if anything is UNPLANNED, else apply, tidy the
+                                    folders this run emptied, verify against the move log, print a short report
+  organise.py --verify LOG.csv      every moved file is at its destination with its size, no source or .part left
   organise.py plan.json --apply     does it, then re-points symlinks/launchers whose target moved; writes the move
                                     log next to the quarantine ("Drivekeeper move log <date>.csv", + rename logs)
   organise.py --undo LOG.csv        moves everything in a move log back (newest first), restores links
@@ -21,7 +24,10 @@ Plan (JSON):
     {"route": "phone", "from": "/mnt/b/Phone", "to": "/home/me/Pictures/Phone"},
     {"quarantine": "/home/me/Downloads/old-v1/", "category": "Old versions"},
     {"dedupe": "/home/me/Downloads/a.pdf", "keep": "/mnt/a/Docs/a.pdf", "else": "/mnt/a/Docs/"},
-    {"extract": "/mnt/b/album.7z", "to": "/home/me/Pictures/Albums/"}
+    {"extract": "/mnt/b/album.7z", "to": "/home/me/Pictures/Albums/"},
+    {"keep": "/mnt/b/Phone/.thumbnails"},                                       # leave in place, on purpose
+    {"sort": "/mnt/b/old laptop", "to": {"photo": "/home/me/Pictures/Old laptop", "document": "/mnt/a/Documents/Old laptop",
+                                         "project": "/home/me/Projects/", "other": "/mnt/a/Misc/Old laptop"}}
   ]
 }
 Works on Linux, macOS and Windows (Python 3.8+, stdlib only). On Windows write paths as "C:/Users/me/..."
@@ -32,7 +38,7 @@ source of a verified cross-drive copy; cross-drive copies go to .part, are md5-v
 are confirmed by md5 before quarantining; nothing inside the quarantine counts as a "kept" copy; explicit renames
 (rules with "log") only compare against their own destination; safe to re-run after an interruption.
 """
-import csv, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, time, zipfile
+import collections, csv, glob, hashlib, json, os, re, shutil, subprocess, sys, tarfile, tempfile, time, zipfile
 
 SEP = os.sep
 norm = os.path.normpath
@@ -40,6 +46,63 @@ norm = os.path.normpath
 RESERVE = 2 * 10**9                       # keep this much free on a destination filesystem
 DATE = re.compile(r'(?<!\d)(19[89]\d|20[0-4]\d)[-_]?(0[1-9]|1[0-2])[-_]?(0[1-9]|[12]\d|3[01])(?!\d{3})')
 VIDEO = ('.mp4', '.mov', '.3gp', '.mkv', '.avi', '.webm', '.m4v')
+KINDS = {k: tuple(v.split()) for k, v in {                     # "sort" rule: file kind by extension
+    'photo': '.jpg .jpeg .png .gif .heic .heif .webp .tif .tiff .bmp .cr2 .cr3 .nef .arw .dng .orf .rw2 .raf',
+    'video': '.mp4 .mov .mkv .avi .wmv .3gp .m4v .webm .mpg .mpeg .rm .flv .mts .vob',
+    'music': '.mp3 .flac .wav .m4a .aac .ogg .wma .opus .mid .midi .aiff .amr',
+    'document': '.pdf .doc .docx .odt .rtf .txt .md .xls .xlsx .ods .csv .ppt .pptx .pps .ppsx .odp .wps .pages .numbers .key .html .htm',
+    'book': '.epub .mobi .azw .azw3 .djvu .fb2 .cbz .cbr',
+    'archive': '.zip .7z .rar .tar .gz .tgz .bz2 .xz .zst .001 .002 .003',
+    'software': '.exe .msi .dmg .pkg .deb .rpm .appimage .apk .iso .flatpakref .qcow2 .vdi .vmdk .vhd .vhdx',
+    'mail': '.eml .mbox .pst .ost .msg .vcf .ics',
+    'design': '.psd .ai .xcf .svg .indd .sketch .fig .blend .stl .obj .ttf .otf .woff .woff2'}.items()}
+OS_DIRS = ('.Trash', '$RECYCLE.BIN', 'System Volume Information', '.Trashes', '.Spotlight-V100', '.fseventsd', 'lost+found')
+PROJECT = {'.git', 'pyproject.toml', 'package.json', 'setup.py', 'Makefile', 'CMakeLists.txt', 'Cargo.toml', 'go.mod', 'pom.xml',
+           'build.gradle', 'composer.json', 'Gemfile'}
+
+
+def kind(name):
+    low = name.lower()
+    return next((k for k, exts in KINDS.items() if low.endswith(exts)), 'other')
+
+
+def is_project(folder, names):
+    """Sources plus what builds them (SKILL.md rule 6): move as one unit, never sort inside."""
+    exts = [os.path.splitext(n)[1].lower() for n in names]
+    return (bool(PROJECT & set(names)) or bool(set(exts) & {'.sln', '.xcodeproj', '.prproj', '.drp'}) or {'.tex', '.aux'} <= set(exts)
+            or sum(e in ('.html', '.htm') for e in exts) >= 5)                  # a saved website / site backup
+
+
+JUNK = re.compile(r'^(desktop\.ini|thumbs\.db|\.ds_store|~\$.*|\.~lock\..*#|.*\.crdownload|.*\.tmp)$', re.I)
+
+
+def is_program(names):
+    """An installed program or game: move whole (its .exe needs its data files next to it)."""
+    low = [n.lower() for n in names]
+    exts = [os.path.splitext(n)[1] for n in low]
+    return ('bin' in low and 'lib' in low) or any(n.startswith('unins') and n.endswith('.exe') for n in low) or (
+        '.exe' in exts and (sum(e in ('.pak', '.bin', '.dat', '.dll', '.so', '.jar', '.pck') for e in exts) >= 2 or 'data' in low))
+
+
+def companions(names):
+    """Kind per file, but sets stay together: files sharing a stem (Film.mkv + Film.en.srt, IMG_1.HEIC + IMG_1.MOV,
+    x.7z.001/.002) follow their largest member's kind, and in a folder that is mostly music or video the few other
+    files (cover art, .cue, .nfo, subtitles) follow the majority."""
+    k = {n: kind(n) for n, _ in names}
+    stems = {}
+    for n, size in names:
+        stems.setdefault(n.split('.')[0].lower(), []).append((size, n))
+    for group in stems.values():
+        if len({k[n] for _, n in group}) > 1:
+            lead = k[max(group)[1]]
+            for _, n in group:
+                k[n] = lead
+    size = dict(names)
+    weight = {x: sum(size[n] for n in k if k[n] == x) for x in set(k.values())}
+    major = max(weight, key=weight.get) if weight else None
+    if major in ('music', 'video') and weight[major] >= 0.8 * sum(size.values()) and sum(v != major for v in k.values()) <= 4:
+        k = {n: major for n in k}                                   # cover art, .srt, .cue, .nfo stay with the album/film
+    return k
 
 
 class Engine:
@@ -50,6 +113,7 @@ class Engine:
         self.progress_t, self.done_bytes = time.time(), 0
         self.ops, self.claimed, self.log = [], set(), []
         self.index, self.planned, self.moved, self.renames, self.stats = {}, {}, set(), {}, {}
+        self.hashes = {}
 
     # ── helpers ────────────────────────────────────────────────────────────────────────────────
     def label(self, p):
@@ -69,6 +133,11 @@ class Engine:
     def note(self, action, src, dst='', size=0, info=''):
         self.log.append((action, src, dst, size, info))
         self.stats[action] = self.stats.get(action, 0) + 1
+
+    def hash(self, p):                                             # md5, read once per path
+        if p not in self.hashes:
+            self.hashes[p] = self.md5(p)
+        return self.hashes[p]
 
     @staticmethod
     def md5(p):
@@ -117,13 +186,55 @@ class Engine:
                 elif os.path.getsize(p) > 0:
                     self.claim('move', p, os.path.join(self.phone_dest(f, base), f))
 
+    def covered(self, p):
+        while True:
+            if p in self.claimed:
+                return True
+            parent = os.path.dirname(p)
+            if parent == p or not parent:
+                return False
+            p = parent
+
+    def sort_folder(self, folder, to, keep_folders=True, junk=True):
+        """Route every file under folder by kind into to[kind] (or to['other']); projects move whole to to['project'],
+        installed programs/games whole to to['app'] (or to['software']); well-known junk goes to quarantine/Junk.
+        Hidden files and kinds with no destination are left for UNPLANNED, so nothing is guessed silently."""
+        for dp, dn, fn in os.walk(folder):
+            unit = 'project' if dp != folder and is_project(dp, dn + fn) else 'app' if dp != folder and is_program(dn + fn) else None
+            if unit:
+                dn[:] = []
+                dest = to.get(unit) or (to.get('software') if unit == 'app' else None)
+                if dest and not self.covered(dp):
+                    self.claim('move', dp, self.target(dp, dest if dest.endswith(('/', '\\')) else dest + SEP))
+                continue
+            dn[:] = sorted(d for d in dn if not d.startswith('.') and not d.startswith(OS_DIRS) and not self.covered(os.path.join(dp, d)))
+            visible = sorted(f for f in fn if not f.startswith('.'))
+            kinds = companions([(f, os.lstat(os.path.join(dp, f)).st_size) for f in visible])
+            for f in visible:
+                p = os.path.join(dp, f)
+                if self.covered(p):
+                    continue
+                if junk and not os.path.islink(p) and (JUNK.match(f) or os.path.getsize(p) == 0):
+                    self.claim('move', p, self.qpath(p, 'Junk'))
+                    continue
+                dest = to.get(kinds[f], to.get('other'))
+                if not dest:
+                    continue
+                rel = os.path.relpath(dp, folder) if keep_folders else '.'
+                self.claim('move', p, norm(os.path.join(dest, rel, f)))
+
     def build(self):
         for r in self.plan['rules']:
             if 'route' in r:
                 if os.path.isdir(r['from']):
                     self.route_phone(norm(r['from']), norm(r['to']))
                 continue
-            key = next(k for k in ('move', 'each', 'quarantine', 'dedupe', 'extract') if k in r)
+            if 'sort' in r:
+                for src in sorted(glob.glob(norm(r['sort']))):
+                    if os.path.isdir(src):
+                        self.sort_folder(src, r['to'], r.get('keep_folders', True), r.get('junk', True))   # raw: a trailing / means "into"
+                continue
+            key = next(k for k in ('move', 'each', 'quarantine', 'dedupe', 'extract', 'keep') if k in r)
             pat = r[key]
             hits = sorted(glob.glob(norm(pat), recursive=True)) if any(c in pat for c in '*?[') else [norm(pat)]
             for src in hits:
@@ -140,23 +251,19 @@ class Engine:
                     self.claim('dedupe', src, self.target(src, r['else']), norm(r['keep']))
                 elif key == 'extract':
                     self.claim('extract', src, norm(r['to']))
+                elif key == 'keep':
+                    self.claim('keep', src)
 
     def unplanned(self):
-        def covered(p):
-            while True:
-                if p in self.claimed:
-                    return True
-                parent = os.path.dirname(p)
-                if parent == p or not parent:
-                    return False
-                p = parent
         out = []
         for root in map(norm, self.plan.get('scan', [])):
             for dp, dn, fn in os.walk(root):
+                dn[:] = [d for d in dn if not d.startswith(OS_DIRS)]          # OS folders are never reorganised
                 if dp in self.claimed:
                     dn[:] = []
                     continue
-                out += [os.path.join(dp, f) for f in fn if not covered(os.path.join(dp, f))]
+                out += [os.path.join(dp, f) for f in fn + [d for d in dn if os.path.islink(os.path.join(dp, d))]
+                        if not self.covered(os.path.join(dp, f))]                    # folder symlinks need a rule too
         return out
 
     # ── execution ──────────────────────────────────────────────────────────────────────────────
@@ -213,13 +320,14 @@ class Engine:
         if not os.path.lexists(src):
             return self.note('MISSING', src, dst)
         size = os.lstat(src).st_size
-        key = (os.path.basename(src), size)
-        if allow_dup and not os.path.islink(src):
-            other = dst if self.exists(dst) else (None if log else self.index.get(key))
-            if other and other != src:
+        if allow_dup and size and not os.path.islink(src):
+            # content, not name: any file already placed with the same size and md5 is the kept copy. Explicit renames
+            # (rules with "log") only compare against their own destination.
+            cands = ([dst] if self.exists(dst) else []) + ([] if log else self.index.get(size, []))
+            for other in cands:
                 real = other if self.apply else self.planned.get(other, other)
-                if os.path.isfile(real) and os.path.getsize(real) == size and (not self.apply or self.md5(src) == self.md5(real)):
-                    self.note('DUPLICATE', src, other, size, 'md5-equal' if self.apply else 'name+size equal (md5 checked on --apply)')
+                if real != src and os.path.isfile(real) and os.path.getsize(real) == size and self.hash(src) == self.hash(real):
+                    self.note('DUPLICATE', src, other, size, 'md5-equal')
                     return self.place_file(src, self.qpath(src, 'Duplicates'), None, allow_dup=False)
         if self.exists(dst):
             new = self.suffixed(dst, src)
@@ -236,8 +344,8 @@ class Engine:
                 self.copy_verified(src, dst)
         else:
             self.planned[dst] = src
-        if not dst.startswith(self.q + SEP):                       # never treat a quarantined copy as "kept"
-            self.index.setdefault(key, dst)
+        if size and not dst.startswith(self.q + SEP):              # never treat a quarantined copy as "kept"
+            self.index.setdefault(size, []).append(dst)
         self.moved.add(src)
         self.note('MOVE' if same else 'COPY+VERIFY+REMOVE', src, dst, size)
         self.done_bytes += size
@@ -277,6 +385,8 @@ class Engine:
 
     def run_op(self, op):
         kind, src, dst, extra = op
+        if kind == 'keep':
+            return self.note('KEPT', src, '', 0, 'a "keep" rule leaves it where it is')
         if kind == 'move':
             self.place(src, dst, extra)
         elif kind == 'dedupe':
@@ -374,6 +484,19 @@ class Engine:
                     elif x.lower().endswith(('.desktop', '.url')) and os.path.isfile(p) and rewrite_paths(p, moved):
                         self.note('RELINK', p, '', 0, 'launcher: moved paths updated')
 
+    def drop_emptied(self):
+        """Remove folders that this run emptied (they held files it moved); folders that were already empty stay."""
+        scan = [norm(r) for r in self.plan.get('scan', [])]
+        dirs = {os.path.dirname(s) for a, s, d, *_ in self.log if a in MOVED_ACTIONS}
+        for d in sorted(dirs, key=len, reverse=True):
+            while any(d.startswith(r + SEP) for r in scan) and d not in scan:
+                try:
+                    os.rmdir(d)
+                except OSError:
+                    break
+                self.note('REMOVED-EMPTY-FOLDER', d)
+                d = os.path.dirname(d)
+
     def sweep_empty(self):
         for root in map(norm, self.plan.get('scan', [])):
             if os.path.isdir(root) and not any(fn for _, _, fn in os.walk(root)):
@@ -387,6 +510,7 @@ class Engine:
             self.run_op(op)
         log = out_prefix + '-dryrun.csv'
         if self.apply:
+            self.drop_emptied()
             self.sweep_empty()
             self.relink()
             log = os.path.join(self.plan.get('log_dir') or os.path.dirname(self.q),
@@ -442,6 +566,54 @@ def rewrite_paths(path, mapping):
     with open(path, 'w', encoding='utf-8', errors='surrogateescape') as f:
         f.write(new)
     return True
+
+
+def verify(rows, roots=()):
+    """Mechanical proof from the move log: each moved file is at its destination with the logged size and its source
+    is gone; no half-copied .part file anywhere under roots."""
+    problems = []
+    for action, src, dst, size, info in rows:
+        if action in ('MOVE', 'COPY+VERIFY+REMOVE'):
+            if not os.path.lexists(dst):
+                problems.append(f'missing at destination: {dst}')
+            elif os.path.isfile(dst) and not os.path.islink(dst) and os.path.getsize(dst) != int(size or 0):
+                problems.append(f'size changed: {dst}')
+        if action in MOVED_ACTIONS and os.path.lexists(src) and not os.path.isdir(src):
+            problems.append(f'source still present: {src}')
+        if action == 'MOVE-FOLDER' and not os.path.isdir(dst):
+            problems.append(f'folder missing at destination: {dst}')
+    for r in roots:
+        for dp, dn, fn in os.walk(r) if os.path.isdir(r) else ():
+            problems += [f'half-copied file: {os.path.join(dp, f)}' for f in fn if f.endswith('.part')]
+            problems += [f'broken link: {os.path.join(dp, x)} -> {os.readlink(os.path.join(dp, x))}' for x in dn + fn
+                         if os.path.islink(os.path.join(dp, x)) and not os.path.exists(os.path.join(dp, x))]
+    return problems
+
+
+def report(eng):
+    """Short summary for the agent's context; the move log holds every line."""
+    st, q = eng.stats, eng.q
+    files = st.get('MOVE', 0) + st.get('COPY+VERIFY+REMOVE', 0)
+    nbytes = sum(int(r[3] or 0) for r in eng.log if r[0] in ('MOVE', 'COPY+VERIFY+REMOVE'))
+    quar = collections.Counter(os.path.relpath(d, q).split(SEP)[1] for a, s, d, *_ in eng.log
+                               if a in MOVED_ACTIONS and d.startswith(q + SEP) and os.path.relpath(d, q).count(SEP) >= 1)
+    dests = {r[2] for r in eng.log if r[0] in MOVED_ACTIONS}
+    left = [p for p in eng.unplanned() if not eng.covered(p) and not any(p == d or p.startswith(d + SEP) for d in dests)
+            and not p.startswith(q + SEP) and p != eng.log_path]
+    roots = sorted({norm(r) for r in list(eng.labels) + eng.plan.get('scan', [])} | {q})
+    problems = verify(eng.log, roots)
+    out = [f'APPLIED: {files} files ({nbytes / 1e9:.2f} GB): {st.get("MOVE", 0)} renamed in place, '
+           f'{st.get("COPY+VERIFY+REMOVE", 0)} copied across drives and md5-verified; {st.get("MOVE-FOLDER", 0)} whole folders',
+           f'Quarantine {q}: ' + (', '.join(f'{k} {v}' for k, v in quar.most_common()) or 'nothing'),
+           f'Kept both (same name, different content): {st.get("CLASH-KEPT-BOTH", 0)}   duplicates (md5): {st.get("DUPLICATE", 0)}   '
+           f'links re-pointed: {st.get("RELINK", 0)}   emptied folders removed: {st.get("REMOVED-EMPTY-FOLDER", 0)}   '
+           f'sources missing: {st.get("MISSING", 0)}',
+           'VERIFY: ' + ('OK: every moved file is at its destination with its size, no source or .part file left'
+                         if not problems else f'{len(problems)} PROBLEMS'), *problems[:15],
+           f'Left in place (no rule): {len(left)}', *[f'  {p}' for p in left[:10]],
+           f'Move log: {eng.log_path}', f'Undo:     python3 {os.path.abspath(__file__)} --undo "{eng.log_path}"']
+    print('\n'.join(out))
+    return not problems
 
 
 def undo(log_path):
@@ -526,6 +698,38 @@ def selftest():
             raise AssertionError('zip-slip not blocked')
         except SystemExit:
             pass
+        # sort by kind (sub-folders kept, project moved whole, hidden left) + duplicates found by content, any name
+        S = f'{d}/S'
+        for rel, data in (('trip/a.jpg', b'A'), ('trip/b.JPG', b'B'), ('notes/x.pdf', b'X'), ('code/main.py', b'm'),
+                          ('code/pyproject.toml', b't'), ('trip/copy of a.jpg', b'A'), ('misc/thing.xyz', b'?'), ('.hidden', b'h')):
+            os.makedirs(os.path.dirname(f'{S}/{rel}'), exist_ok=True)
+            open(f'{S}/{rel}', 'wb').write(data)
+        for rel, data in (('film/Film.mkv', b'V' * 50), ('film/English.srt', b's'), ('game/Game.exe', b'MZ'), ('game/data/a.pak', b'p'),
+                          ('game/unins000.exe', b'u'), ('dl/desktop.ini', b'x'), ('dl/~$draft.docx', b'l'), ('dl/empty.txt', b''), ('album/01.mp3', b'M' * 40),
+                          ('album/02.mp3', b'N' * 40), ('album/cover.jpg', b'c'), ('site/' + 'p1.html', b'1'), ('site/p2.html', b'2'),
+                          ('site/p3.html', b'3'), ('site/p4.html', b'4'), ('site/p5.html', b'5'), ('site/img/a.gif', b'g')):
+            os.makedirs(os.path.dirname(f'{S}/{rel}'), exist_ok=True)
+            open(f'{S}/{rel}', 'wb').write(data)
+        os.makedirs(f'{S}/$RECYCLE.BIN/S-1')
+        open(f'{S}/$RECYCLE.BIN/S-1/$R1.jpg', 'wb').write(b'r')
+        e4 = Engine({'quarantine': f'{S}/_q', 'labels': {S: 'S'}, 'scan': [S], 'rules': [
+            {'keep': f'{S}/misc/thing.xyz'}, {'sort': S, 'to': {'photo': f'{S}/Pictures', 'document': f'{S}/Docs', 'project': f'{S}/Projects/',
+                                                              'video': f'{S}/Videos', 'music': f'{S}/Music', 'app': f'{S}/Games/'}}]}, apply=True)
+        e4.run(f'{d}/test4')
+        assert os.path.isfile(f'{S}/Pictures/trip/a.jpg') and os.path.isfile(f'{S}/Pictures/trip/b.JPG')
+        assert os.path.isfile(f'{S}/Docs/notes/x.pdf') and os.path.isfile(f'{S}/Projects/code/pyproject.toml')
+        assert os.path.isfile(f'{S}/_q/from S/Duplicates/trip/copy of a.jpg') and e4.stats.get('DUPLICATE') == 1
+        assert e4.stats.get('UNPLANNED') == 1 and e4.stats.get('KEPT') == 1 and os.path.isfile(f'{S}/misc/thing.xyz')
+        assert os.path.isfile(f'{S}/.hidden') and os.path.isfile(f'{S}/$RECYCLE.BIN/S-1/$R1.jpg')       # hidden + OS folder untouched
+        assert not os.path.exists(f'{S}/trip') and not os.path.exists(f'{S}/notes') and os.path.isdir(f'{S}/misc')  # emptied → removed
+        assert os.path.isfile(f'{S}/Videos/film/English.srt') and os.path.isfile(f'{S}/Music/album/cover.jpg')    # sets stay together
+        assert os.path.isfile(f'{S}/Games/game/data/a.pak') and os.path.isfile(f'{S}/Games/game/Game.exe')        # a game moves whole
+        assert all(os.path.isfile(f'{S}/_q/from S/Junk/dl/{n}') for n in ('desktop.ini', '~$draft.docx', 'empty.txt'))
+        assert os.path.isfile(f'{S}/Projects/site/img/a.gif')                                                     # a website moves whole
+        assert verify(e4.log, [S]) == []
+        open(f'{S}/Pictures/trip/x.part', 'w').write('half')
+        os.rename(f'{S}/Docs/notes/x.pdf', f'{S}/Docs/x.pdf')
+        assert len(verify(e4.log, [S])) == 2                                          # a missing file and a .part are caught
         # relink (symlink into a moved folder, a moved relative symlink, a launcher) and undo
         R = f'{d}/R'
         os.makedirs(f'{R}/Games/Lantern')
@@ -561,6 +765,11 @@ if __name__ == '__main__':
     if '--selftest' in sys.argv:
         selftest()
         sys.exit()
+    if len(sys.argv) == 3 and sys.argv[1] == '--verify':
+        with open(sys.argv[2], newline='') as f:
+            bad = verify(list(csv.reader(f))[1:])
+        print('VERIFY: OK' if not bad else f'{len(bad)} PROBLEMS', *bad[:50], sep='\n')
+        sys.exit(1 if bad else 0)
     if len(sys.argv) == 3 and sys.argv[1] == '--undo':
         stats, out = undo(sys.argv[2])
         print('UNDONE →', out)
@@ -572,6 +781,16 @@ if __name__ == '__main__':
     plan_path = sys.argv[1]
     eng = Engine(json.load(open(plan_path)), apply='--apply' in sys.argv)
     prefix = os.path.splitext(plan_path)[0]
+    if '--go' in sys.argv:
+        chk = Engine(json.load(open(plan_path)))
+        chk.build()
+        miss = chk.unplanned()
+        if miss:
+            print(f'STOP, nothing changed: {len(miss)} UNPLANNED files. Add rules (first 40):', *miss[:40], sep='\n')
+            sys.exit(2)
+        eng = Engine(json.load(open(plan_path)), apply=True)
+        eng.run(os.path.splitext(plan_path)[0])
+        sys.exit(0 if report(eng) else 1)
     if '--check' in sys.argv:
         eng.build()
         miss = eng.unplanned()

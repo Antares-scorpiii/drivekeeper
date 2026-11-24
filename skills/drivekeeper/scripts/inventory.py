@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only survey helpers. Never moves or changes anything.
 
-  inventory.py overview ROOT [ROOT...]       everything below in one call, capped output (start here)
+  inventory.py overview ROOT... [--out DIR]  START HERE: the whole picture in one walk, ~80 lines; full lists to DIR
   inventory.py survey ROOT [--depth 2]       per-folder size / file count / top extensions (no file dump)
   inventory.py dups ROOT [ROOT...]           duplicates: same size, CONFIRMED by md5, any name (writes dups.csv)
   inventory.py hidden ROOT [ROOT...]         hidden files/folders, split into "content" vs "app/project config"
@@ -171,19 +171,154 @@ def links(roots, limit=100):
     print(*out[:limit], sep='\n')
 
 
-def overview(roots):
+def overview(roots, out='.'):
+    """The whole picture in one walk, capped at ~80 printed lines; full lists go to <out>/survey-details.txt and
+    <out>/dups.csv. Answers what an organiser needs before writing a plan, so no exploratory listing is needed."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from organise import KINDS, kind, is_project
+    import unicodedata, zipfile, tarfile
+    MAGIC = [(b'%PDF', 'pdf', ('.pdf', '.ai')), (b'\xff\xd8\xff', 'jpeg', ('.jpg', '.jpeg')), (b'\x89PNG', 'png', ('.png',)),
+             (b'GIF8', 'gif', ('.gif',))]
+    OS_DIRS = ('.Trash', '$RECYCLE.BIN', 'System Volume Information', '.Spotlight-V100', '.fseventsd', '.Trashes', 'lost+found')
+    files, sizes, size_of = [], collections.Counter(), {}
+    kinds, kind_bytes, other_ext = collections.Counter(), collections.Counter(), collections.Counter()
+    projects, os_dirs, hidden, links, odd, wrong, collide, empty_dirs, empty_files = [], [], collections.defaultdict(list), [], [], [], [], [], 0
+    dated = collections.defaultdict(list)
     for r in roots:
-        print(f'== survey {r}')
-        survey(r, 2)
+        for dp, dn, fn in os.walk(r):
+            rel = os.path.relpath(dp, r)
+            top = os.path.join(os.path.basename(r.rstrip(os.sep)), *rel.split(os.sep)[:2]) if rel != '.' else os.path.basename(r)
+            names = dn + fn
+            if dp != r and is_project(dp, names):
+                projects.append(dp)
+            for d in list(dn):
+                full = os.path.join(dp, d)
+                if d.startswith(OS_DIRS):
+                    os_dirs.append(full); dn.remove(d)
+                elif d in FUNCTIONAL:
+                    dn.remove(d)
+                elif os.path.islink(full):
+                    links.append((full, os.readlink(full)))
+            if not dn and not fn:
+                empty_dirs.append(dp)
+            folded = collections.defaultdict(set)
+            for n in names:
+                folded[unicodedata.normalize('NFC', n).casefold()].add(n)
+            collide += [sorted(v) for v in folded.values() if len(v) > 1]
+            for f in fn:
+                p = os.path.join(dp, f)
+                if os.path.islink(p):
+                    links.append((p, os.readlink(p))); continue
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if is_hidden(p, f) or any(x.startswith('.') for x in rel.split(os.sep) if x != '.'):
+                    tag = ('.trashed' if f.startswith('.trashed') else '.thumbnails' if '.thumbnails' in p else
+                           'empty marker' if st.st_size == 0 else 'other hidden')
+                    hidden[tag].append((p, st.st_size)); continue
+                files.append(p); size_of[p] = st.st_size; sizes[top] += st.st_size
+                k = kind(f); kinds[k] += 1; kind_bytes[k] += st.st_size
+                if k == 'other':
+                    other_ext[os.path.splitext(f)[1].lower() or '(none)'] += 1
+                if st.st_size == 0:
+                    empty_files += 1
+                if re.search(r'[\x00-\x1f]', f) or f[:1] in '- ' or f[-1:] in ' .' or len(p) > 240:
+                    odd.append(p)
+                m = DATE.search(f)
+                if m:
+                    dated[dp].append(''.join(m.groups()))
+                if st.st_size:
+                    with open(p, 'rb') as fh:
+                        head = fh.read(8)
+                    ext = os.path.splitext(f)[1].lower()
+                    real = next((name for sig, name, _ in MAGIC if head.startswith(sig)), None)
+                    claims = next((name for _, name, exts in MAGIC if ext in exts), None)
+                    if real and real != claims:
+                        wrong.append(f'{p}  (content is {real}{", extension says " + claims if claims else ""})')
+                    elif claims and not real:
+                        wrong.append(f'{p}  (not a real {claims})')
+    # duplicates: md5 only within same-size groups
+    by_size = collections.defaultdict(list)
+    for p in files:
+        if size_of[p]:
+            by_size[size_of[p]].append(p)
+    groups, md5_of = collections.defaultdict(list), {}
+    for s_, ps in by_size.items():
+        if len(ps) > 1:
+            for p in ps:
+                md5_of[p] = md5(p)
+                groups[(s_, md5_of[p])].append(p)
+    groups = {k: v for k, v in groups.items() if len(v) > 1}
+    by_name = collections.defaultdict(list)
+    for p in md5_of:
+        by_name[(os.path.basename(p), size_of[p])].append(p)
+    look = [' | '.join(ps) for ps in by_name.values() if len({md5_of[p] for p in ps}) > 1]
+    pairs = collections.Counter(tuple(sorted({os.path.dirname(p) for p in v})[:2]) for v in groups.values())
+    with open(os.path.join(out, 'dups.csv'), 'w', newline='') as fh:
+        csv.writer(fh).writerows([('md5', 'bytes', 'path')] + [(h, s_, p) for (s_, h), v in sorted(groups.items()) for p in v])
+    # archives: integrity + whether their members already exist on disk (name + size)
+    on_disk = {(os.path.basename(p), size_of[p]) for p in files}
+    arcs = []
+    for p in files:
+        if kind(p) != 'archive':
+            continue
+        try:
+            if zipfile.is_zipfile(p):
+                with zipfile.ZipFile(p) as z:
+                    mem = [i for i in z.infolist() if not i.is_dir()]
+                    bad = z.testzip() if size_of[p] < 5e8 else None
+                    found = sum((os.path.basename(i.filename), i.file_size) in on_disk for i in mem)
+                    arcs.append(f'{p}  zip, {len(mem)} files, {"CORRUPT member " + bad if bad else "ok"}, {found}/{len(mem)} already on disk')
+            elif tarfile.is_tarfile(p):
+                with tarfile.open(p) as t:
+                    mem = [m for m in t.getmembers() if m.isfile()]
+                    found = sum((os.path.basename(m.name), m.size) in on_disk for m in mem)
+                    arcs.append(f'{p}  tar, {len(mem)} files, ok, {found}/{len(mem)} already on disk')
+            elif p.lower().endswith(('.zip', '.tar', '.gz', '.tgz')):
+                arcs.append(f'{p}  CORRUPT or truncated (not a readable {os.path.splitext(p)[1]}): keep it, never extract')
+            else:
+                arcs.append(f'{p}  7z/rar/multi-part: {"list with 7z l" if shutil.which("7z") else "needs 7-Zip to read; keep together"}')
+        except Exception as e:
+            arcs.append(f'{p}  CORRUPT ({type(e).__name__})')
+    # print (capped) + details file
+    full, shown = [], []
+    base = os.path.commonpath([os.path.abspath(r) for r in roots]) if len(roots) > 1 else os.path.dirname(os.path.abspath(roots[0]))
+    short = lambda x: str(x).replace(base + os.sep, '')[:200]
+    def sect(title, rows, cap):
+        full.append(f'== {title} ({len(rows)})'); full.extend(map(str, rows))
+        shown.append(f'== {title} ({len(rows)})'); shown.extend(f'  {short(x)}' for x in rows[:cap])
+        if len(rows) > cap:
+            shown.append(f'  … {len(rows) - cap} more in survey-details.txt')
+    vol = []
     for r in roots:
-        print(f'== dates {r}')
-        dates(r, limit=40)
-    print('== hidden')
-    hidden(roots, limit=40)
-    print('== links')
-    links(roots, limit=40)
-    print('== dups')
-    dups(roots)
+        u = shutil.disk_usage(r)
+        vol.append(f'{r}  device {os.stat(r).st_dev}  free {u.free / 1e9:.1f} GB')
+    sect('volumes (same device = instant renames; different = copy + verify)', vol, 10)
+    sect('biggest folders (depth 2)', [f'{v / 1e6:9.1f} MB  {k}' for k, v in sizes.most_common()], 12)
+    sect('kinds', [f'{k:9} {kinds[k]:6} files {kind_bytes[k] / 1e6:9.1f} MB' for k in sorted(kinds, key=lambda k: -kinds[k])]
+         + [f'other extensions: ' + ' '.join(f'{e}:{n}' for e, n in other_ext.most_common(15))], 15)
+    sect('projects: move each as one unit, never sort inside', projects, 10)
+    sect('folders with dates in file names (first → last, count)',
+         [f'{min(v)} → {max(v)} {len(v):5}  {k}' for k, v in sorted(dated.items(), key=lambda kv: -len(kv[1]))], 10)
+    sect(f'duplicates by content (md5): {sum(len(v) - 1 for v in groups.values())} extra copies; folder pairs → dups.csv',
+         [f'{n:5}  {" <-> ".join(k)}' for k, n in pairs.most_common()], 10)
+    sect('same name + size but DIFFERENT content: keep both', look, 3)
+    sect('names that collide on Windows/macOS (case or Unicode form)', collide, 5)
+    sect('archives', arcs, 12)
+    sect('wrong or missing extension', wrong, 10)
+    sect('awkward names (control chars, leading -/space, trailing space/dot, very long)', odd, 8)
+    sect('OS-managed folders: leave alone', os_dirs, 8)
+    sect('hidden / app-managed (the user decides)', [f'{k}: {len(v)} files, {sum(x for _, x in v) / 1e6:.1f} MB, e.g. {v[0][0]}' for k, v in hidden.items()], 8)
+    sect('symlinks and launchers', [f'{p} -> {t}' for p, t in links] + [p for p in files if p.lower().endswith(LAUNCHER)], 8)
+    sect(f'empty: {empty_files} empty files; empty folders', empty_dirs, 5)
+    with open(os.path.join(out, 'survey-details.txt'), 'w') as fh:
+        fh.write('\n'.join(full) + '\n')
+    print(f'Paths below are relative to {base}')
+    print(f'{len(files)} files, {sum(size_of.values()) / 1e9:.2f} GB under {len(roots)} roots (contents of .git, node_modules, .venv '
+          f'not counted: they move with their project). Full lists: '
+          f'{os.path.join(out, "survey-details.txt")}, {os.path.join(out, "dups.csv")}')
+    print('\n'.join(shown))
 
 
 if __name__ == '__main__':
@@ -193,6 +328,12 @@ if __name__ == '__main__':
     if len(sys.argv) < 3:
         sys.exit(__doc__)
     argv = sys.argv[2:]
+    out = '.'
+    if '--out' in argv:
+        i = argv.index('--out')
+        out = argv[i + 1]
+        del argv[i:i + 2]
+        os.makedirs(out, exist_ok=True)
     depth = 2
     if '--depth' in argv:
         i = argv.index('--depth')
@@ -200,4 +341,4 @@ if __name__ == '__main__':
         del argv[i:i + 2]
     cmd, args = sys.argv[1], argv
     {'survey': lambda: survey(args[0], depth), 'dups': lambda: dups(args), 'hidden': lambda: hidden(args),
-     'dates': lambda: dates(args[0]), 'links': lambda: links(args), 'overview': lambda: overview(args)}[cmd]()
+     'dates': lambda: dates(args[0]), 'links': lambda: links(args), 'overview': lambda: overview(args, out)}[cmd]()

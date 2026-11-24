@@ -1,6 +1,6 @@
 {
   "name": "drivekeeper",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Organise messy drives and folders without losing a file: md5-proven duplicates, a reviewable quarantine instead of deletes, never overwrites, dry run before every move.",
   "keywords": ["files", "organize", "declutter", "duplicates", "drives", "backup"]
 }
